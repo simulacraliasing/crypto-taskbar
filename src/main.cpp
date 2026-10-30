@@ -1,6 +1,8 @@
 #define WINVER 0x0A00
 #define _WIN32_WINNT 0x0A00
 #include "network.hpp"
+#include <objidl.h> // COM declarations must precede GDI+ with the Windows SDK.
+
 #include <atomic>
 #include <commctrl.h>
 #include <condition_variable>
@@ -205,22 +207,25 @@ Color ChangeColor(double change) {
     return change >= 0 ? (g_dark ? Color(255, 83, 204, 157) : Color(255, 0, 119, 80))
                        : (g_dark ? Color(255, 248, 130, 142) : Color(255, 188, 50, 67));
 }
-void Text(Graphics &g, const std::wstring &text, float x, float y, float w, float h, float size,
-          Color color, bool right = false, bool bold = false) {
+void Text(Graphics &g, const std::wstring &text, double x, double y, double w, double h,
+          double size, Color color, bool right = false, bool bold = false) {
     FontFamily family(L"Segoe UI");
-    Font font(&family, size * g_scale, bold ? FontStyleBold : FontStyleRegular, UnitPixel);
+    Font font(&family, static_cast<float>(size * g_scale), bold ? FontStyleBold : FontStyleRegular,
+              UnitPixel);
     SolidBrush brush(color);
     StringFormat format;
     format.SetAlignment(right ? StringAlignmentFar : StringAlignmentNear);
     format.SetLineAlignment(StringAlignmentCenter);
     format.SetTrimming(StringTrimmingEllipsisCharacter);
     format.SetFormatFlags(StringFormatFlagsNoWrap);
-    g.DrawString(text.c_str(), static_cast<INT>(text.size()), &font, RectF(x, y, w, h), &format,
-                 &brush);
+    g.DrawString(text.c_str(), static_cast<INT>(text.size()), &font,
+                 RectF(static_cast<float>(x), static_cast<float>(y), static_cast<float>(w),
+                       static_cast<float>(h)),
+                 &format, &brush);
 }
-void RoundRect(Graphics &g, RectF r, float radius, Color color) {
+void RoundRect(Graphics &g, RectF r, double radius, Color color) {
     GraphicsPath path;
-    const float d = radius * 2;
+    const float d = static_cast<float>(radius * 2);
     path.AddArc(r.X, r.Y, d, d, 180, 90);
     path.AddArc(r.GetRight() - d, r.Y, d, d, 270, 90);
     path.AddArc(r.GetRight() - d, r.GetBottom() - d, d, d, 0, 90);
