@@ -20,10 +20,10 @@
 using namespace Gdiplus;
 namespace {
 constexpr wchar_t kClass[] = L"CryptoTaskbar.Window.v1";
-constexpr UINT kTray = WM_APP + 1, kUpdated = WM_APP + 2;
+constexpr UINT kShowList = WM_APP + 1, kUpdated = WM_APP + 2;
 constexpr int kRefresh = 101, kSettings = 102, kStartup = 103, kExit = 104, kFolder = 105;
 HINSTANCE g_instance;
-HWND g_overlay{}, g_popup{}, g_editor{}, g_edit{};
+HWND g_overlay{}, g_popup{}, g_editor{};
 HANDLE g_singleton{};
 HFONT g_editFont{};
 ULONG_PTR g_gdiToken{};
@@ -37,12 +37,14 @@ bool g_stop = false, g_refresh = false;
 unsigned g_generation = 0;
 int g_scroll = 0, g_wheel = 0;
 UINT g_taskbarCreated{};
-bool g_dark = true, g_popupPinned = false, g_preview = false, g_inspect = false;
+bool g_dark = true, g_popupPinned = false, g_preview = false;
 int g_previewTheme = 0;
 DWORD g_hoverStart = 0, g_leaveStart = 0;
 float g_scale = 1;
 RECT g_barRect{};
-NOTIFYICONDATAW g_tray{};
+size_t g_currentCoin = 0;
+ULONGLONG g_rotatedAt = 0;
+bool g_animating = false, g_menuOpen = false;
 
 int Px(int n) { return MulDiv(n, static_cast<int>(g_scale * 96), 96); }
 long long Now() { return static_cast<long long>(std::time(nullptr)); }
@@ -97,6 +99,10 @@ void Apply(ct::Config config) {
         g_refresh = true;
     }
     g_scroll = 0;
+    g_currentCoin = 0;
+    g_animating = false;
+    g_rotatedAt = GetTickCount64();
+    KillTimer(g_overlay, 3);
     g_cv.notify_all();
     PostMessageW(g_overlay, kUpdated, 0, 0);
 }
@@ -269,24 +275,27 @@ void Render(HWND hwnd) {
         const auto c = Config();
         const auto quotes = Quotes();
         if (hwnd == g_overlay) {
-            const int count = std::min(c.visibleCoins, static_cast<int>(c.coins.size()));
-            const float cell = static_cast<float>(w) / count;
-            for (int i = 0; i < count; ++i) {
+            g.Clear(Color(1, 0, 0, 0)); // Nonzero alpha makes the whole rectangle clickable.
+            g_currentCoin %= c.coins.size();
+            auto drawCoin = [&](size_t i, double y) {
                 const auto &q = quotes[i];
-                const float x = i * cell + Px(9), cw = cell - Px(18);
-                Text(g, ct::Wide(c.coins[i].label) + (q.stale ? L" ·" : L""), x, 0, cw, h * .43f,
-                     10, Muted());
-                Text(g, Price(c, q), x, h * .34f, cw, h * .6f, 13, q.stale ? Muted() : Fg(), false,
-                     true);
+                const int labelWidth =
+                    std::max(Px(16), w - Px(18) - (c.showChange && q.change ? Px(64) : 0));
+                Text(g, ct::Wide(c.coins[i].label) + (q.stale ? L" ·" : L""), Px(9), y, labelWidth,
+                     h * .43, 10, Muted());
+                Text(g, Price(c, q), Px(9), y + h * .34, w - Px(18), h * .6, 13,
+                     q.stale ? Muted() : Fg(), false, true);
                 if (c.showChange && q.change)
-                    Text(g, ct::Wide(ct::FormatChange(*q.change)), x, 0, cw, h * .43f, 10,
-                         q.stale ? Muted() : ChangeColor(*q.change), true);
-                if (i) {
-                    Pen pen(g_dark ? Color(60, 160, 170, 185) : Color(50, 80, 90, 110));
-                    g.DrawLine(&pen, i * cell, static_cast<float>(Px(12)), i * cell,
-                               static_cast<float>(h - Px(12)));
-                }
-            }
+                    Text(g, ct::Wide(ct::FormatChange(*q.change)), Px(9), y, w - Px(18), h * .43,
+                         10, q.stale ? Muted() : ChangeColor(*q.change), true);
+            };
+            if (g_animating && c.coins.size() > 1) {
+                double p = std::clamp((GetTickCount64() - g_rotatedAt) / 260.0, 0.0, 1.0);
+                p = p * p * (3 - 2 * p);
+                drawCoin(g_currentCoin, -p * h);
+                drawCoin((g_currentCoin + 1) % c.coins.size(), (1 - p) * h);
+            } else
+                drawCoin(g_currentCoin, 0);
         } else {
             RoundRect(g, RectF(1, 1, static_cast<float>(w - 2), static_cast<float>(h - 2)), Px(14),
                       g_dark ? Color(252, 31, 34, 40) : Color(253, 249, 250, 252));
@@ -399,6 +408,8 @@ bool Fullscreen() {
            r.right >= mi.rcMonitor.right && r.bottom >= mi.rcMonitor.bottom;
 }
 void Placement() {
+    if (g_menuOpen)
+        return;
     HWND taskbar = FindWindowW(L"Shell_TrayWnd", nullptr);
     if (!taskbar || !GetWindowRect(taskbar, &g_barRect)) {
         ShowWindow(g_overlay, SW_HIDE);
@@ -441,6 +452,8 @@ void Placement() {
         if (IsWindowVisible(g_popup))
             ShowPopup(g_popupPinned);
     }
+    if (g_editor)
+        return;
     POINT cursor{};
     GetCursorPos(&cursor);
     const bool over = Contains(g_overlay, cursor), overPopup = Contains(g_popup, cursor);
@@ -491,6 +504,9 @@ void ToggleStartup() {
 }
 void OpenEditor();
 void Menu() {
+    if (g_menuOpen)
+        return;
+    g_menuOpen = true;
     g_popupPinned = false;
     ShowWindow(g_popup, SW_HIDE);
     HMENU menu = CreatePopupMenu();
@@ -506,6 +522,7 @@ void Menu() {
     const auto id = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON, point.x,
                                    point.y, 0, g_overlay, nullptr);
     DestroyMenu(menu);
+    g_menuOpen = false;
     PostMessageW(g_overlay, WM_NULL, 0, 0);
     switch (id) {
     case kRefresh:
@@ -526,183 +543,18 @@ void Menu() {
         break;
     }
 }
-HICON MakeIcon() {
-    HDC screen = GetDC(nullptr), dc = CreateCompatibleDC(screen);
-    BITMAPINFO bi{};
-    bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    bi.bmiHeader.biWidth = 32;
-    bi.bmiHeader.biHeight = -32;
-    bi.bmiHeader.biPlanes = 1;
-    bi.bmiHeader.biBitCount = 32;
-    void *pixels{};
-    HBITMAP bmp = CreateDIBSection(screen, &bi, DIB_RGB_COLORS, &pixels, nullptr, 0);
-    auto old = SelectObject(dc, bmp);
-    {
-        Bitmap b(32, 32, 128, PixelFormat32bppPARGB, static_cast<BYTE *>(pixels));
-        Graphics g(&b);
-        g.Clear(Color(0, 0, 0, 0));
-        g.SetSmoothingMode(SmoothingModeAntiAlias);
-        SolidBrush bg(Color(255, 54, 120, 238));
-        g.FillEllipse(&bg, 1, 1, 30, 30);
-        Pen pen(Color(255, 255, 255, 255), 2.8f);
-        PointF line[]{{8, 22}, {13, 16}, {18, 19}, {24, 10}};
-        g.DrawLines(&pen, line, 4);
-        g.Flush();
-    }
-    HBITMAP mask = CreateBitmap(32, 32, 1, 1, nullptr);
-    ICONINFO iconInfo{TRUE, 0, 0, mask, bmp};
-    HICON icon = CreateIconIndirect(&iconInfo);
-    SelectObject(dc, old);
-    DeleteObject(mask);
-    DeleteObject(bmp);
-    DeleteDC(dc);
-    ReleaseDC(nullptr, screen);
-    return icon;
-}
-void AddTray() {
-    g_tray.cbSize = sizeof(g_tray);
-    g_tray.hWnd = g_overlay;
-    g_tray.uID = 1;
-    g_tray.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
-    g_tray.uCallbackMessage = kTray;
-    if (!g_tray.hIcon)
-        g_tray.hIcon = MakeIcon();
-    wcscpy_s(g_tray.szTip, L"Crypto Taskbar · 自选行情");
-    Shell_NotifyIconW(NIM_ADD, &g_tray);
-}
-void EditorTheme() {
-    if (!g_editor)
-        return;
-    BOOL dark = g_dark;
-    DwmSetWindowAttribute(g_editor, 20, &dark, sizeof(dark));
-    InvalidateRect(g_editor, nullptr, TRUE);
-}
-LRESULT CALLBACK EditorProc(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
-    switch (msg) {
-    case WM_ERASEBKGND: {
-        HDC dc = reinterpret_cast<HDC>(w);
-        RECT r{};
-        GetClientRect(hwnd, &r);
-        SetDCBrushColor(dc, g_dark ? RGB(31, 34, 40) : RGB(249, 250, 252));
-        FillRect(dc, &r, reinterpret_cast<HBRUSH>(GetStockObject(DC_BRUSH)));
-        return 1;
-    }
-    case WM_CTLCOLOREDIT: {
-        HDC dc = reinterpret_cast<HDC>(w);
-        const COLORREF bg = g_dark ? RGB(31, 34, 40) : RGB(255, 255, 255);
-        SetTextColor(dc, g_dark ? RGB(240, 242, 246) : RGB(24, 29, 37));
-        SetBkColor(dc, bg);
-        SetDCBrushColor(dc, bg);
-        return reinterpret_cast<LRESULT>(GetStockObject(DC_BRUSH));
-    }
-    case WM_SIZE: {
-        const int width = LOWORD(l), height = HIWORD(l);
-        MoveWindow(g_edit, 16, 16, width - 32, height - 76, TRUE);
-        MoveWindow(GetDlgItem(hwnd, 1), width - 190, height - 45, 80, 28, TRUE);
-        MoveWindow(GetDlgItem(hwnd, 2), width - 100, height - 45, 80, 28, TRUE);
-        return 0;
-    }
-    case WM_COMMAND:
-        if (LOWORD(w) == 1) {
-            int n = GetWindowTextLengthW(g_edit);
-            std::wstring value(n + 1, 0);
-            GetWindowTextW(g_edit, value.data(), n + 1);
-            value.resize(n);
-            try {
-                auto text = ct::Utf8(value);
-                auto config = ct::ParseConfig(text);
-                SaveText(text);
-                Apply(std::move(config));
-                DestroyWindow(hwnd);
-            } catch (const std::exception &e) {
-                MessageBoxW(hwnd, ct::Wide(e.what()).c_str(), L"配置未保存",
-                            MB_OK | MB_ICONWARNING);
-            }
-            return 0;
-        }
-        if (LOWORD(w) == 2) {
-            DestroyWindow(hwnd);
-            return 0;
-        }
-        break;
-    case WM_GETMINMAXINFO:
-        reinterpret_cast<MINMAXINFO *>(l)->ptMinTrackSize = {520, 360};
-        return 0;
-    case WM_CLOSE:
-        DestroyWindow(hwnd);
-        return 0;
-    case WM_DESTROY:
-        g_editor = nullptr;
-        g_edit = nullptr;
-        if (g_editFont) {
-            DeleteObject(g_editFont);
-            g_editFont = nullptr;
-        }
-        return 0;
-    }
-    return DefWindowProcW(hwnd, msg, w, l);
-}
-void OpenEditor() {
-    if (g_editor) {
-        ShowWindow(g_editor, SW_RESTORE);
-        SetForegroundWindow(g_editor);
-        return;
-    }
-    WNDCLASSW cls{};
-    cls.lpfnWndProc = EditorProc;
-    cls.hInstance = g_instance;
-    cls.lpszClassName = L"CryptoTaskbar.Config";
-    cls.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
-    cls.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-    RegisterClassW(&cls);
-    g_editor = CreateWindowExW(WS_EX_APPWINDOW, cls.lpszClassName, L"Crypto Taskbar — 配置",
-                               WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, 800, 660, nullptr,
-                               nullptr, g_instance, nullptr);
-    if (!g_editor) {
-        MessageBoxW(g_overlay,
-                    (L"Cannot create settings window: " + std::to_wstring(GetLastError())).c_str(),
-                    L"Crypto Taskbar", MB_OK);
-        return;
-    }
-    g_edit =
-        CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
-                        WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL | WS_HSCROLL | ES_LEFT |
-                            ES_MULTILINE | ES_AUTOVSCROLL | ES_AUTOHSCROLL,
-                        0, 0, 0, 0, g_editor, reinterpret_cast<HMENU>(10), g_instance, nullptr);
-    SendMessageW(g_edit, EM_SETLIMITTEXT, 256 * 1024, 0);
-    g_editFont = CreateFontW(-14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
-                             OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                             DEFAULT_PITCH, L"Consolas");
-    SendMessageW(g_edit, WM_SETFONT, reinterpret_cast<WPARAM>(g_editFont), TRUE);
-    try {
-        const auto text =
-            ct::Replace(ct::Replace(ct::Utf8(ReadText(g_configPath)), "\r\n", "\n"), "\n", "\r\n");
-        SetWindowTextW(g_edit, ct::Wide(text).c_str());
-    } catch (...) {
-        SetWindowTextW(g_edit, ct::Wide(ct::Replace(ct::DefaultConfig(), "\n", "\r\n")).c_str());
-    }
-    CreateWindowW(L"BUTTON", L"保存", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON, 0, 0,
-                  0, 0, g_editor, reinterpret_cast<HMENU>(1), g_instance, nullptr);
-    CreateWindowW(L"BUTTON", L"取消", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 0, 0, 0, 0, g_editor,
-                  reinterpret_cast<HMENU>(2), g_instance, nullptr);
-    RECT r{};
-    GetClientRect(g_editor, &r);
-    SendMessageW(g_editor, WM_SIZE, 0, MAKELPARAM(r.right, r.bottom));
-    EditorTheme();
-    SetWindowPos(g_editor, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
-    SetForegroundWindow(g_editor);
-    SetFocus(g_edit);
-}
+#include "settings.hpp"
+
 LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
     if (g_taskbarCreated && msg == g_taskbarCreated) {
-        AddTray();
+
         Placement();
         Render(g_overlay);
         return 0;
     }
     switch (msg) {
     case WM_MOUSEACTIVATE:
-        return (hwnd == g_popup || g_preview || g_inspect) ? MA_ACTIVATE : MA_NOACTIVATE;
+        return (hwnd == g_popup) ? MA_ACTIVATE : MA_NOACTIVATE;
     case WM_ERASEBKGND:
         return 1;
     case WM_PAINT: {
@@ -713,7 +565,29 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
     }
     case WM_TIMER:
         if (hwnd == g_overlay) {
+            if (w == 3) {
+                if (GetTickCount64() - g_rotatedAt >= 260) {
+                    g_currentCoin = (g_currentCoin + 1) % Config().coins.size();
+                    g_animating = false;
+                    g_rotatedAt = GetTickCount64();
+                    KillTimer(hwnd, 3);
+                }
+                Render(hwnd);
+                return 0;
+            }
             Placement();
+            POINT cursor{};
+            GetCursorPos(&cursor);
+            if (!g_rotatedAt)
+                g_rotatedAt = GetTickCount64();
+            if (!g_animating && !g_menuOpen && !g_editor && !IsWindowVisible(g_popup) &&
+                !Contains(g_overlay, cursor) && Config().coins.size() > 1 &&
+                GetTickCount64() - g_rotatedAt >=
+                    static_cast<ULONGLONG>(Config().rotationSeconds) * 1000) {
+                g_rotatedAt = GetTickCount64();
+                g_animating = true;
+                SetTimer(hwnd, 3, 16, nullptr);
+            }
             if (g_preview && w == 2) {
                 ShowPopup(true);
                 KillTimer(hwnd, 2);
@@ -749,9 +623,23 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
         }
         return 0;
     case WM_RBUTTONUP:
+    case WM_CONTEXTMENU:
         Menu();
         return 0;
+    case WM_NCHITTEST:
+        if (hwnd == g_overlay)
+            return HTCLIENT;
+        break;
     case WM_MOUSEWHEEL:
+        if (hwnd == g_overlay) {
+            const auto count = Config().coins.size();
+            g_currentCoin =
+                (g_currentCoin + (GET_WHEEL_DELTA_WPARAM(w) > 0 ? count - 1 : 1)) % count;
+            g_animating = false;
+            g_rotatedAt = GetTickCount64();
+            KillTimer(hwnd, 3);
+            Render(hwnd);
+        }
         if (hwnd == g_popup) {
             g_wheel += GET_WHEEL_DELTA_WPARAM(w);
             int steps = g_wheel / WHEEL_DELTA;
@@ -782,13 +670,10 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             }
         }
         return 0;
-    case kTray:
-        if (l == WM_RBUTTONUP)
-            Menu();
-        else if (l == WM_LBUTTONUP) {
-            Placement();
-            ShowPopup(true);
-        }
+    case kShowList: {
+        Placement();
+        ShowPopup(true);
+    }
         return 0;
     case WM_CLOSE:
         ShowWindow(g_overlay, SW_HIDE);
@@ -821,8 +706,6 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int) {
             g_previewTheme = 1;
         } else if (arg == L"--settings")
             editOnStart = true;
-        else if (arg == L"--inspect")
-            g_inspect = true;
     }
     LocalFree(argv);
     g_singleton = CreateMutexW(
@@ -830,7 +713,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int) {
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
         HWND previous = FindWindowW(kClass, L"Crypto Taskbar");
         if (previous)
-            PostMessageW(previous, kTray, 0, WM_LBUTTONUP);
+            PostMessageW(previous, kShowList, 0, WM_LBUTTONUP);
         if (g_singleton)
             CloseHandle(g_singleton);
         return 0;
@@ -858,6 +741,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int) {
     GdiplusStartupInput startup;
     if (GdiplusStartup(&g_gdiToken, &startup, nullptr) != Ok)
         return 1;
+    INITCOMMONCONTROLSEX controls{sizeof(INITCOMMONCONTROLSEX), ICC_TAB_CLASSES};
+    InitCommonControlsEx(&controls);
     WNDCLASSW cls{};
     cls.lpfnWndProc = WindowProc;
     cls.hInstance = instance;
@@ -865,21 +750,19 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int) {
     cls.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     if (!RegisterClassW(&cls))
         return 1;
-    g_overlay = CreateWindowExW(
-        WS_EX_LAYERED |
-            ((g_preview || g_inspect) ? WS_EX_APPWINDOW : WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE),
-        kClass, L"Crypto Taskbar", WS_POPUP, 0, 0, 1, 1, nullptr, nullptr, instance, nullptr);
-    g_popup = CreateWindowExW(
-        WS_EX_LAYERED | ((g_preview || g_inspect) ? WS_EX_APPWINDOW : WS_EX_TOOLWINDOW), kClass,
-        L"Crypto Taskbar — 自选行情", WS_POPUP, 0, 0, 1, 1,
-        (g_preview || g_inspect) ? nullptr : g_overlay, nullptr, instance, nullptr);
+    g_overlay = CreateWindowExW(WS_EX_LAYERED | (WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE), kClass,
+                                L"Crypto Taskbar", WS_POPUP, 0, 0, 1, 1, nullptr, nullptr, instance,
+                                nullptr);
+    g_popup =
+        CreateWindowExW(WS_EX_LAYERED | WS_EX_TOOLWINDOW, kClass, L"Crypto Taskbar — 自选行情",
+                        WS_POPUP, 0, 0, 1, 1, g_overlay, nullptr, instance, nullptr);
     if (!g_overlay || !g_popup)
         return 1;
     g_taskbarCreated = RegisterWindowMessageW(L"TaskbarCreated");
     g_dark = DarkTheme();
     Placement();
     Render(g_overlay);
-    AddTray();
+
     SetTimer(g_overlay, 1, 150, nullptr);
     if (g_preview) {
         for (size_t i = 0; i < g_quotes.size(); ++i) {
@@ -900,9 +783,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int) {
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }
-    Shell_NotifyIconW(NIM_DELETE, &g_tray);
-    if (g_tray.hIcon)
-        DestroyIcon(g_tray.hIcon);
+
     {
         std::lock_guard lock(g_mutex);
         g_stop = true;

@@ -1,7 +1,7 @@
 {
   "refreshSeconds": 30,
-  "visibleCoins": 2,
-  "width": 250,
+  "rotationSeconds": 4,
+  "width": 150,
   "position": "left",
   "offset": 16,
   "theme": "system",

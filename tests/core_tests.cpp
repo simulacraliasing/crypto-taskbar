@@ -16,6 +16,19 @@ int main() {
         }
     };
     auto c = ct::ParseConfig(ct::DefaultConfig());
+    auto round = ct::ParseConfig(ct::SerializeConfig(c));
+    expect(round.rotationSeconds == 4 && round.width == 150);
+    expect(round.coins[0].symbol == c.coins[0].symbol && round.sources.size() == c.sources.size());
+    round.sources["custom"] = {"https://example.com/{symbol}",
+                               "/data/price",
+                               "/data/change",
+                               "",
+                               {{"Authorization", "Bearer %PRICE_API_TOKEN%"}}};
+    round.coins.push_back({"CUSTOM", "x/y", "custom"});
+    round.rotationSeconds = 9;
+    auto saved = ct::ParseConfig(ct::SerializeConfig(round));
+    expect(saved.rotationSeconds == 9 && saved.coins.back().source == "custom" &&
+           saved.sources.at("custom").headers.at("Authorization") == "Bearer %PRICE_API_TOKEN%");
     expect(c.coins.size() == 3);
     expect(ct::RequestUrl(c, c.coins[0]) == ct::RequestUrl(c, c.coins[1]));
     expect(ct::RequestUrl(c, c.coins[0]).find("bitcoin,ethereum,solana") != std::string::npos);

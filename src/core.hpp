@@ -20,7 +20,7 @@ struct Coin {
     std::string label, symbol, source;
 };
 struct Config {
-    int refreshSeconds = 30, visibleCoins = 2, width = 250, offset = 16;
+    int refreshSeconds = 30, rotationSeconds = 4, width = 150, offset = 16;
     std::string position = "left", theme = "system", currency = "$";
     bool showChange = false;
     std::map<std::string, Source> sources;
@@ -36,8 +36,8 @@ struct Quote {
 inline std::string DefaultConfig() {
     return R"({
   "refreshSeconds": 30,
-  "visibleCoins": 2,
-  "width": 250,
+  "rotationSeconds": 4,
+  "width": 150,
   "position": "left",
   "offset": 16,
   "theme": "system",
@@ -77,15 +77,16 @@ inline Config ParseConfig(const std::string &text) {
     Require(j.is_object(), "Config must be a JSON object.");
     Config c;
     c.refreshSeconds = j.value("refreshSeconds", 30);
-    c.visibleCoins = j.value("visibleCoins", 2);
-    c.width = j.value("width", 250);
+    c.rotationSeconds = j.value("rotationSeconds", 4);
+    c.width = j.value("width", 150);
     c.offset = j.value("offset", 16);
     c.position = j.value("position", "left");
     c.theme = j.value("theme", "system");
     c.currency = j.value("currency", "$");
     c.showChange = j.value("showChange", false);
     Require(c.refreshSeconds >= 5 && c.refreshSeconds <= 86400, "refreshSeconds must be 5..86400.");
-    Require(c.visibleCoins >= 1 && c.visibleCoins <= 8, "visibleCoins must be 1..8.");
+    Require(c.rotationSeconds >= 1 && c.rotationSeconds <= 3600,
+            "rotationSeconds must be 1..3600.");
     Require(c.width >= 80 && c.width <= 1200, "width must be 80..1200.");
     Require(c.offset >= 0 && c.offset <= 10000, "offset must be 0..10000.");
     Require(c.position == "left" || c.position == "right", "position must be left or right.");
@@ -134,6 +135,32 @@ inline Config ParseConfig(const std::string &text) {
         c.coins.push_back(std::move(coin));
     }
     return c;
+}
+inline std::string SerializeConfig(const Config &c) {
+    Json j{{"refreshSeconds", c.refreshSeconds},
+           {"rotationSeconds", c.rotationSeconds},
+           {"width", c.width},
+           {"offset", c.offset},
+           {"position", c.position},
+           {"theme", c.theme},
+           {"currency", c.currency},
+           {"showChange", c.showChange}};
+    j["sources"] = Json::object();
+    for (const auto &[name, s] : c.sources) {
+        auto &v = j["sources"][name];
+        v = {{"url", s.url}, {"pricePath", s.pricePath}};
+        if (!s.changePath.empty())
+            v["changePath"] = s.changePath;
+        if (!s.openPath.empty())
+            v["openPath"] = s.openPath;
+        if (!s.headers.empty())
+            v["headers"] = s.headers;
+    }
+    j["coins"] = Json::array();
+    for (const auto &coin : c.coins)
+        j["coins"].push_back(
+            {{"label", coin.label}, {"symbol", coin.symbol}, {"source", coin.source}});
+    return j.dump(2);
 }
 inline std::string Replace(std::string text, const std::string &key, const std::string &value) {
     size_t pos = 0;
