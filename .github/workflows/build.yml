@@ -8,20 +8,29 @@ permissions:
 jobs:
   windows:
     runs-on: windows-latest
+    env:
+      CARGO_BUILD_JOBS: 3
     steps:
       - uses: actions/checkout@v4
-      - name: Configure
-        run: cmake -S . -B build -A x64
-      - name: Build
-        run: cmake --build build --config Release --parallel
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.95.0
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: Format
+        run: cargo fmt --all --check
       - name: Test
-        run: ctest --test-dir build -C Release --output-on-failure
+        run: cargo test -p crypto-taskbar-core -p crypto-taskbar --locked
+      - name: Build
+        run: cargo build --release --workspace --locked
       - uses: actions/upload-artifact@v4
         with:
           name: CryptoTaskbar-windows-x64
           path: |
-            build/Release/CryptoTaskbar.exe
+            target/release/CryptoTaskbar.exe
+            target/release/CryptoTaskbarSettings.exe
             config.example.json
             README.md
             LICENSE
             THIRD_PARTY.md
+            THIRD_PARTY_NOTICES.txt

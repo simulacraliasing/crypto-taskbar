@@ -7,7 +7,7 @@
 
 ## 使用
 
-从 [Releases](https://github.com/simulacraliasing/crypto-taskbar/releases/latest) 下载 `CryptoTaskbar.exe`，双击运行。默认通过 Binance 轮播 BTCUSDT、ETHUSDT、SOLUSDT，每 4 秒切换，每 30 秒更新行情，同时显示 24h 涨跌幅。
+从 [Releases](https://github.com/simulacraliasing/crypto-taskbar/releases/latest) 下载 `CryptoTaskbar-windows-x64.zip`，解压后双击 `CryptoTaskbar.exe`。请将 `CryptoTaskbarSettings.exe` 保留在同一文件夹。默认通过 Binance 轮播 BTCUSDT、ETHUSDT、SOLUSDT，每 4 秒切换，每 30 秒更新行情，同时显示 24h 涨跌幅。
 
 - 鼠标停留约 0.3 秒：展开完整列表；移开后收起。移到列表上可以继续查看，长列表支持滚轮。
 - 点击币价：固定或收起列表。停留查看或打开配置时，轮播暂停。
@@ -21,7 +21,7 @@
 
 ## 图形配置
 
-右键 → **配置…**，通过三个页面设置，无需编辑文本文件。
+右键 → **配置…**，打开 GPUI Kit 配置窗口，通过三个页面设置，无需编辑文本文件。也可直接运行 `CryptoTaskbarSettings.exe`。
 
 **币种**：左边是轮播顺序，右边填写显示名称、币种代码并选择数据源；可以添加、更新、删除及上下移动。最多支持 100 个币种。
 
@@ -48,7 +48,7 @@ Binance 和 OKX 支持全部五个涨跌幅周期。24h 使用数据源原有统
 
 ### 自定义数据源
 
-支持返回 JSON 的 HTTP/HTTPS GET 接口。路径采用 [JSON Pointer](https://json.nlohmann.me/features/json_pointer/)，如 `/data/0/last` 表示 `data` 数组第一项的 `last` 字段。
+支持返回 JSON 的 HTTP/HTTPS GET 接口。路径采用 [JSON Pointer](https://www.rfc-editor.org/rfc/rfc6901)，如 `/data/0/last` 表示 `data` 数组第一项的 `last` 字段。
 
 | 输入项 | 示例 |
 |---|---|
@@ -80,29 +80,28 @@ Binance 和 OKX 支持全部五个涨跌幅周期。24h 使用数据源原有统
 
 ## 构建
 
-需要 CMake 3.20+ 和支持 C++17 的 Windows 编译器。第三方 JSON 头文件已随源码提供，构建不需要下载依赖。
+整个项目使用 Rust。配置界面使用 [GPUI Kit](https://github.com/longbridge/gpui-kit) 0.8.1，任务栏窗口通过 Rust 调用 Windows API 绘制。配置程序只在打开设置时运行，不需要 WebView、Electron 或 .NET。
 
-Visual Studio 2022：
-
-```powershell
-cmake -S . -B build -A x64
-cmake --build build --config Release --parallel
-ctest --test-dir build -C Release --output-on-failure
-```
-
-MinGW-w64 + Ninja：
+需要 Windows x64、Rust 1.95.0 和 Visual Studio 2022 C++ 构建工具（含 Windows SDK）。首次构建会下载 Cargo 依赖，GPUI 编译时间较长。
 
 ```powershell
-cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
-cmake --build build --parallel
-ctest --test-dir build --output-on-failure
+cargo test -p crypto-taskbar-core -p crypto-taskbar --locked
+cargo build --release --workspace --locked
 ```
 
-`network_tests` 是手动运行的真实接口检查，不放入默认离线测试：
+输出位于 `target/release/`，发布时需要同时携带两个 EXE。`Cargo.lock` 固定依赖，GitHub Actions 使用相同工具链构建和测试。
+
+- `crates/core`：配置兼容、校验、行情解析和格式化。
+- `crates/app`：WinHTTP 请求、行情调度、任务栏与悬停窗口。
+- `crates/settings`：GPUI Kit 图形配置。
+
+真实接口检查（需要网络，不包含在离线测试中）：
 
 ```powershell
-cmake --build build --config Release --target network_tests
+cargo run -p crypto-taskbar --example probe --locked
 ```
+
+从 1.x 升级时，先右键退出旧程序，再启动新版。原有配置路径不变，首次保存仍会备份旧配置。旧版本可从 Releases 下载；如果之前启用了开机启动，移动程序目录后请重新开关一次该选项。
 
 参数：`--config "路径\config.json"` 指定单独配置，`--settings` 启动时打开图形配置。`--preview-light` / `--preview-dark` 使用示意行情，方便检查配色；不更改系统主题，也不显示任务栏或托盘图标。
 
