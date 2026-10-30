@@ -59,7 +59,7 @@ pub fn titlebar_theme(window: &Window, dark: bool) {
             let value = i32::from(dark);
             DwmSetWindowAttribute(
                 handle.hwnd.get() as _,
-                DWMWA_USE_IMMERSIVE_DARK_MODE,
+                DWMWA_USE_IMMERSIVE_DARK_MODE as u32,
                 &value as *const _ as _,
                 std::mem::size_of_val(&value) as u32,
             );
