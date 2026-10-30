@@ -1,0 +1,32 @@
+{
+  "refreshSeconds": 30,
+  "visibleCoins": 2,
+  "width": 250,
+  "position": "left",
+  "offset": 16,
+  "theme": "system",
+  "currency": "$",
+  "showChange": false,
+  "sources": {
+    "coingecko": {
+      "url": "https://api.coingecko.com/api/v3/simple/price?ids={ids}&vs_currencies=usd&include_24hr_change=true",
+      "pricePath": "/{symbol}/usd",
+      "changePath": "/{symbol}/usd_24h_change"
+    },
+    "binance": {
+      "url": "https://api.binance.com/api/v3/ticker/24hr?symbol={symbol}",
+      "pricePath": "/lastPrice",
+      "changePath": "/priceChangePercent"
+    },
+    "okx": {
+      "url": "https://www.okx.com/api/v5/market/ticker?instId={symbol}",
+      "pricePath": "/data/0/last",
+      "openPath": "/data/0/open24h"
+    }
+  },
+  "coins": [
+    {"label": "BTC", "symbol": "bitcoin", "source": "coingecko"},
+    {"label": "ETH", "symbol": "ethereum", "source": "coingecko"},
+    {"label": "SOL", "symbol": "solana", "source": "coingecko"}
+  ]
+}

@@ -1,0 +1,15 @@
+build*/
+dist/
+*.exe
+*.dll
+*.obj
+*.o
+*.pdb
+*.ilk
+*.tmp
+*.bak
+config.json
+.env
+.env.*
+.vs/
+.vscode/
