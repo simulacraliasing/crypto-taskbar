@@ -1,4 +1,19 @@
 use gpui_kit::Window;
+
+pub fn quit(cx: &mut gpui_kit::App) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static EXITING: AtomicBool = AtomicBool::new(false);
+    if !EXITING.swap(true, Ordering::SeqCst) {
+        // Saving is synchronous and complete before this is called. Some Windows
+        // GPU backends can stall on shutdown after the last window disappears;
+        // don't leave the settings helper alive and prevent it being reopened.
+        std::thread::spawn(|| {
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            std::process::exit(0);
+        });
+    }
+    cx.quit();
+}
 #[cfg(windows)]
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(Some(0)).collect()

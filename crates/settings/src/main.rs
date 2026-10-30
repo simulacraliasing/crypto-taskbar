@@ -48,7 +48,7 @@ fn start() -> anyhow::Result<()> {
             gpui_kit::init(cx);
             cx.on_window_closed(|cx, _| {
                 if cx.windows().is_empty() {
-                    cx.quit();
+                    platform::quit(cx);
                 }
             })
             .detach();
@@ -79,7 +79,7 @@ fn start() -> anyhow::Result<()> {
                 view
             }) {
                 platform::error(&error.to_string());
-                cx.quit();
+                platform::quit(cx);
             }
         });
     Ok(())

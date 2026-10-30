@@ -558,7 +558,7 @@ impl Settings {
         })();
         if self.report(result, cx) {
             window.remove_window();
-            cx.quit();
+            crate::platform::quit(cx);
         }
     }
     fn coins_page(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -805,7 +805,7 @@ impl Render for Settings {
                             .label("取消")
                             .on_click(|_, window, cx| {
                                 window.remove_window();
-                                cx.quit();
+                                crate::platform::quit(cx);
                             }),
                     )
                     .child(
