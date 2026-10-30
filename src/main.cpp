@@ -307,15 +307,30 @@ void Render(HWND hwnd) {
             g_currentCoin %= c.coins.size();
             auto drawCoin = [&](size_t i, double y) {
                 const auto &q = quotes[i];
-                const int labelWidth =
-                    std::max(Px(16), w - Px(18) - (c.showChange && q.change ? Px(64) : 0));
-                Text(g, ct::Wide(c.coins[i].label) + (q.stale ? L" ·" : L""), Px(9), y, labelWidth,
+                const int lineWidth = w - Px(18);
+                Text(g, ct::Wide(c.coins[i].label) + (q.stale ? L" ·" : L""), Px(9), y, lineWidth,
                      h * .43, 10, Muted());
-                Text(g, Price(c, q), Px(9), y + h * .34, w - Px(18), h * .6, 13,
-                     q.stale ? Muted() : Fg(), false, true);
-                if (c.showChange && q.change)
-                    Text(g, ct::Wide(ct::FormatChange(*q.change)), Px(9), y, w - Px(18), h * .43,
-                         10, q.stale ? Muted() : ChangeColor(*q.change), true);
+                const auto price = Price(c, q);
+                double priceWidth = lineWidth;
+                std::wstring change;
+                double changeWidth = 0;
+                if (c.showChange && q.change) {
+                    change = ct::Wide(ct::FormatChange(*q.change));
+                    FontFamily family(L"Segoe UI");
+                    Font priceFont(&family, 13 * g_scale, FontStyleBold, UnitPixel);
+                    Font changeFont(&family, 11 * g_scale, FontStyleRegular, UnitPixel);
+                    RectF priceBounds, changeBounds;
+                    g.MeasureString(price.c_str(), -1, &priceFont, PointF(0, 0), &priceBounds);
+                    g.MeasureString(change.c_str(), -1, &changeFont, PointF(0, 0), &changeBounds);
+                    changeWidth = std::min<double>(lineWidth, std::ceil(changeBounds.Width));
+                    priceWidth = std::min<double>(std::ceil(priceBounds.Width),
+                                                  std::max(0.0, lineWidth - changeWidth - Px(6)));
+                }
+                Text(g, price, Px(9), y + h * .34, priceWidth, h * .6, 13, q.stale ? Muted() : Fg(),
+                     false, true);
+                if (!change.empty())
+                    Text(g, change, Px(9) + priceWidth + Px(6), y + h * .34, changeWidth, h * .6,
+                         11, q.stale ? Muted() : ChangeColor(*q.change));
             };
             if (g_animating && c.coins.size() > 1) {
                 double p = std::clamp((GetTickCount64() - g_rotatedAt) / 260.0, 0.0, 1.0);
