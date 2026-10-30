@@ -1,6 +1,6 @@
 #include "core.hpp"
 #include <iostream>
-int main() {
+int main() try {
     int checks = 0;
     auto expect = [&](bool ok) {
         ++checks;
@@ -24,17 +24,40 @@ int main() {
                                "/data/change",
                                "",
                                {{"Authorization", "Bearer %PRICE_API_TOKEN%"}}};
-    round.coins.push_back({"CUSTOM", "x/y", "custom"});
+    round.coins.push_back({"CUSTOM", "FOOUSDT", "custom"});
     round.rotationSeconds = 9;
     auto saved = ct::ParseConfig(ct::SerializeConfig(round));
     expect(saved.rotationSeconds == 9 && saved.coins.back().source == "custom" &&
            saved.sources.at("custom").headers.at("Authorization") == "Bearer %PRICE_API_TOKEN%");
     expect(c.coins.size() == 3);
-    expect(ct::RequestUrl(c, c.coins[0]) == ct::RequestUrl(c, c.coins[1]));
-    expect(ct::RequestUrl(c, c.coins[0]).find("bitcoin,ethereum,solana") != std::string::npos);
+    auto batch = c;
+    for (auto &coin : batch.coins)
+        coin.source = "coingecko";
+    expect(ct::RequestUrl(batch, batch.coins[0]) == ct::RequestUrl(batch, batch.coins[1]));
+    expect(ct::RequestUrl(batch, batch.coins[0]).find("bitcoin,ethereum,solana") !=
+           std::string::npos);
     auto j = ct::Json::parse(R"({"bitcoin":{"usd":1234.56,"usd_24h_change":0}})");
     auto q = ct::ParseQuote(j, c.sources.at("coingecko"), c.coins[0]);
     expect(q.price == 1234.56 && q.change == 0.0);
+    expect(c.showChange && c.changePeriod == "24h");
+    expect(ct::CanonicalPair("btc/usdt") == "BTCUSDT" && ct::CanonicalPair("bitcoin") == "BTCUSDT");
+    expect(ct::SourceSymbol(c.sources.at("okx"), c.coins[0]) == "BTC-USDT");
+    expect(ct::SourceSymbol(c.sources.at("coingecko"), c.coins[0]) == "bitcoin");
+    auto unsupported = ct::ParseQuote(j, c.sources.at("coingecko"), c.coins[0], "4h");
+    expect(unsupported.price.has_value() && !unsupported.change &&
+           !unsupported.changeError.empty());
+    auto historical = ct::ParseQuote(ct::Json{{"lastPrice", "110"}, {"priceChangePercent", "88"}},
+                                     c.sources.at("binance"), c.coins[0], "30d");
+    expect(!historical.change);
+    ct::ApplyHistoricalChange(historical, ct::Json::parse(R"([[123,"100"]])"),
+                              c.sources.at("binance"), c.coins[0]);
+    expect(std::abs(*historical.change - 10) < 1e-9);
+    c.changePeriod = "30d";
+    const auto historyUrl = ct::RequestUrl(c, c.coins[0], true, 1800000000000LL);
+    expect(historyUrl.find("startTime=1797408000000") != std::string::npos);
+    auto styleSaved = ct::ParseConfig(ct::SerializeConfig(c));
+    expect(styleSaved.changePeriod == "30d" && styleSaved.upColor == c.upColor &&
+           !styleSaved.sources.at("binance").historyUrl.empty());
     auto src = c.sources.at("okx");
     auto okx = ct::Json::parse(R"({"data":[{"last":"110","open24h":"100"}]})");
     expect(std::abs(*ct::ParseQuote(okx, src, c.coins[0]).change - 10.0) < 1e-9);
@@ -52,6 +75,7 @@ int main() {
     expect(ct::FormatPrice(0.000000001).find("e-") != std::string::npos);
     expect(ct::FormatChange(0) == "+0.00%");
     for (const auto &patch : {ct::Json{{"refreshSeconds", 0}}, ct::Json{{"width", 20}},
+                              ct::Json{{"changePeriod", "9h"}}, ct::Json{{"upColor", "red"}},
                               ct::Json{{"coins", ct::Json::array()}}, ct::Json{{"theme", "bad"}}}) {
         auto x = ct::Json::parse(ct::DefaultConfig());
         x.update(patch);
@@ -80,4 +104,7 @@ int main() {
     }
     expect(threw);
     std::cout << checks << " checks passed\n";
+} catch (const std::exception &e) {
+    std::cerr << e.what() << '\n';
+    return 1;
 }

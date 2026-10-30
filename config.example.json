@@ -6,27 +6,36 @@
   "offset": 16,
   "theme": "system",
   "currency": "$",
-  "showChange": false,
+  "showChange": true,
+  "changePeriod": "24h",
+  "upColor": "#159F76",
+  "downColor": "#E05260",
   "sources": {
     "coingecko": {
       "url": "https://api.coingecko.com/api/v3/simple/price?ids={ids}&vs_currencies=usd&include_24hr_change=true",
       "pricePath": "/{symbol}/usd",
-      "changePath": "/{symbol}/usd_24h_change"
+      "changePath": "/{symbol}/usd_24h_change",
+      "symbolMap": {"BTCUSDT":"bitcoin", "ETHUSDT":"ethereum", "SOLUSDT":"solana"}
     },
     "binance": {
       "url": "https://api.binance.com/api/v3/ticker/24hr?symbol={symbol}",
       "pricePath": "/lastPrice",
-      "changePath": "/priceChangePercent"
+      "changePath": "/priceChangePercent",
+      "historyUrl": "https://api.binance.com/api/v3/klines?symbol={symbol}&interval=1m&startTime={startTimeMs}&limit=1",
+      "historyPricePath": "/0/1"
     },
     "okx": {
       "url": "https://www.okx.com/api/v5/market/ticker?instId={symbol}",
       "pricePath": "/data/0/last",
-      "openPath": "/data/0/open24h"
+      "openPath": "/data/0/open24h",
+      "symbolStyle": "dashed",
+      "historyUrl": "https://www.okx.com/api/v5/market/history-candles?instId={symbol}&bar=1m&after={endTimeMs}&limit=1",
+      "historyPricePath": "/data/0/1"
     }
   },
   "coins": [
-    {"label": "BTC", "symbol": "bitcoin", "source": "coingecko"},
-    {"label": "ETH", "symbol": "ethereum", "source": "coingecko"},
-    {"label": "SOL", "symbol": "solana", "source": "coingecko"}
+    {"label": "BTC", "symbol": "BTCUSDT", "source": "binance"},
+    {"label": "ETH", "symbol": "ETHUSDT", "source": "binance"},
+    {"label": "SOL", "symbol": "SOLUSDT", "source": "binance"}
   ]
 }

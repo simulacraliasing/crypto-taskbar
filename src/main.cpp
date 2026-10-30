@@ -5,6 +5,7 @@
 
 #include <atomic>
 #include <commctrl.h>
+#include <commdlg.h>
 #include <condition_variable>
 #include <ctime>
 #include <dwmapi.h>
@@ -15,6 +16,7 @@
 #include <mutex>
 #include <shellapi.h>
 #include <thread>
+#include <uxtheme.h>
 #include <windowsx.h>
 
 using namespace Gdiplus;
@@ -146,8 +148,10 @@ void Worker() {
                     break;
             }
             const auto &coin = c.coins[i];
-            if (retryAfter[coin.source] > Now())
+            if (retryAfter[coin.source] > Now()) {
+                quotes[i].stale = quotes[i].price.has_value();
                 continue;
+            }
             const auto key = std::make_pair(coin.source, ct::RequestUrl(c, coin));
             auto [it, inserted] = cache.try_emplace(key);
             if (inserted) {
@@ -166,7 +170,29 @@ void Worker() {
             try {
                 if (!it->second.error.empty())
                     throw std::runtime_error(it->second.error);
-                auto q = ct::ParseQuote(it->second.body, c.sources.at(coin.source), coin);
+                const auto &source = c.sources.at(coin.source);
+                auto q = ct::ParseQuote(it->second.body, source, coin, c.changePeriod);
+                if (c.changePeriod != "24h" && !source.historyUrl.empty()) {
+                    try {
+                        const auto historyKey = std::make_pair(
+                            coin.source, ct::RequestUrl(c, coin, true, Now() * 1000));
+                        auto [entry, fresh] = cache.try_emplace(historyKey);
+                        if (fresh) {
+                            try {
+                                entry->second.body =
+                                    ct::FetchJson(session.get(), historyKey.second, source);
+                            } catch (const std::exception &e) {
+                                entry->second.error = e.what();
+                            }
+                        }
+                        if (!entry->second.error.empty())
+                            throw std::runtime_error(entry->second.error);
+                        ct::ApplyHistoricalChange(q, entry->second.body, source, coin);
+                    } catch (const std::exception &e) {
+                        q.change.reset();
+                        q.changeError = e.what();
+                    }
+                }
                 q.updated = Now();
                 quotes[i] = std::move(q);
             } catch (const std::exception &e) {
@@ -210,14 +236,16 @@ bool DarkTheme() {
 Color Fg() { return g_dark ? Color(255, 240, 242, 246) : Color(255, 24, 29, 37); }
 Color Muted() { return g_dark ? Color(255, 162, 169, 181) : Color(255, 94, 103, 118); }
 Color ChangeColor(double change) {
-    return change >= 0 ? (g_dark ? Color(255, 83, 204, 157) : Color(255, 0, 119, 80))
-                       : (g_dark ? Color(255, 248, 130, 142) : Color(255, 188, 50, 67));
+    const auto c = Config();
+    const auto value = std::stoul((change >= 0 ? c.upColor : c.downColor).substr(1), nullptr, 16);
+    return Color(255, static_cast<BYTE>(value >> 16), static_cast<BYTE>(value >> 8),
+                 static_cast<BYTE>(value));
 }
 void Text(Graphics &g, const std::wstring &text, double x, double y, double w, double h,
-          double size, Color color, bool right = false, bool bold = false) {
+          double size, Color color, bool right = false, bool bold = false, float scale = 0) {
     FontFamily family(L"Segoe UI");
-    Font font(&family, static_cast<float>(size * g_scale), bold ? FontStyleBold : FontStyleRegular,
-              UnitPixel);
+    Font font(&family, static_cast<float>(size * (scale > 0 ? scale : g_scale)),
+              bold ? FontStyleBold : FontStyleRegular, UnitPixel);
     SolidBrush brush(color);
     StringFormat format;
     format.SetAlignment(right ? StringAlignmentFar : StringAlignmentNear);
@@ -300,7 +328,8 @@ void Render(HWND hwnd) {
             RoundRect(g, RectF(1, 1, static_cast<float>(w - 2), static_cast<float>(h - 2)), Px(14),
                       g_dark ? Color(252, 31, 34, 40) : Color(253, 249, 250, 252));
             Text(g, L"自选行情", Px(20), Px(10), Px(160), Px(28), 13, Fg(), false, true);
-            Text(g, L"24 小时", w - Px(100), Px(10), Px(80), Px(28), 10, Muted(), true);
+            Text(g, ct::Wide(c.changePeriod), w - Px(100), Px(10), Px(80), Px(28), 10, Muted(),
+                 true);
             const int rows = std::min(PopupRows(), static_cast<int>(c.coins.size()));
             g_scroll =
                 std::clamp(g_scroll, 0, std::max(0, static_cast<int>(c.coins.size()) - rows));
@@ -313,6 +342,8 @@ void Render(HWND hwnd) {
                 std::wstring status = ct::Wide(c.coins[i].source);
                 if (!q.error.empty())
                     status += L" · " + ct::Wide(q.error);
+                else if (!q.changeError.empty())
+                    status += L" · " + ct::Wide(q.changeError);
                 else if (!q.price)
                     status += L" · 正在读取";
                 Text(g, status, Px(20), y + Px(22), w - Px(130), Px(18), 10, Muted());
@@ -321,6 +352,8 @@ void Render(HWND hwnd) {
                 if (q.change)
                     Text(g, ct::Wide(ct::FormatChange(*q.change)), w - Px(110), y + Px(23), Px(90),
                          Px(18), 11, q.stale ? Muted() : ChangeColor(*q.change), true);
+                else
+                    Text(g, L"—", w - Px(110), y + Px(23), Px(90), Px(18), 11, Muted(), true);
             }
             int errors = 0;
             long long oldest = Now();

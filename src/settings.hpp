@@ -30,13 +30,28 @@ enum ControlId {
     IdShowChange,
     IdSave,
     IdCancel,
-    IdHint
+    IdHint,
+    IdChangePeriod,
+    IdUpColor,
+    IdDownColor,
+    IdHistoryUrl,
+    IdHistoryPath,
+    IdSymbolStyle,
+    IdSymbolMap
 };
 ct::Config g_draft;
 std::vector<std::pair<HWND, int>> g_controls;
 std::vector<std::string> g_sourceNames;
 bool g_loading = false;
-int E(int n) { return MulDiv(n, static_cast<int>(GetDpiForWindow(g_editor)), 96); }
+HFONT g_labelFont{};
+float g_editorScale = 1;
+struct FieldBox {
+    RECT rect;
+    int tab;
+    HWND child;
+};
+std::vector<FieldBox> g_fieldBoxes;
+int E(int n) { return static_cast<int>(n * g_editorScale + .5f); }
 HWND Ctrl(int id) { return GetDlgItem(g_editor, id); }
 std::string Value(int id) {
     int n = GetWindowTextLengthW(Ctrl(id));
@@ -50,28 +65,37 @@ int Selected(int id) { return static_cast<int>(SendMessageW(Ctrl(id), LB_GETCURS
 int Combo(int id) { return static_cast<int>(SendMessageW(Ctrl(id), CB_GETCURSEL, 0, 0)); }
 HWND Field(const wchar_t *type, const wchar_t *text, DWORD style, int id, int tab, int x, int y,
            int w, int h) {
-    HWND hwnd =
-        CreateWindowExW(wcscmp(type, L"EDIT") == 0 ? WS_EX_CLIENTEDGE : 0, type, text,
-                        WS_CHILD | WS_VISIBLE | style, E(x), E(y), E(w), E(h), g_editor,
-                        reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), g_instance, nullptr);
-    SendMessageW(hwnd, WM_SETFONT, reinterpret_cast<WPARAM>(g_editFont), TRUE);
+    HWND hwnd = CreateWindowExW(0, type, text, WS_CHILD | WS_VISIBLE | style, E(x), E(y), E(w),
+                                E(h), g_editor, reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)),
+                                g_instance, nullptr);
+    SendMessageW(hwnd, WM_SETFONT,
+                 reinterpret_cast<WPARAM>(wcscmp(type, L"STATIC") == 0 ? g_labelFont : g_editFont),
+                 TRUE);
+    if (wcscmp(type, L"COMBOBOX") == 0)
+        SetWindowTheme(hwnd, L"Explorer", nullptr);
     g_controls.emplace_back(hwnd, tab);
     return hwnd;
 }
 void Label(const wchar_t *text, int tab, int x, int y, int w = 440) {
     Field(L"STATIC", text, 0, -1, tab, x, y, w, 21);
 }
-void Edit(int id, int tab, int x, int y, int w = 440, int h = 27, bool multiline = false) {
-    Field(L"EDIT", L"",
-          WS_TABSTOP | (multiline ? ES_MULTILINE | ES_AUTOVSCROLL | WS_VSCROLL : ES_AUTOHSCROLL),
-          id, tab, x, y, w, h);
+void Edit(int id, int tab, int x, int y, int w = 440, int h = 40, bool multiline = false) {
+    HWND child = Field(
+        L"EDIT", L"",
+        WS_TABSTOP | (multiline ? ES_MULTILINE | ES_AUTOVSCROLL | WS_VSCROLL : ES_AUTOHSCROLL), id,
+        tab, x + 10, y + 10, w - 20, h - 18);
+    g_fieldBoxes.push_back({{E(x), E(y), E(x + w), E(y + h)}, tab, child});
     SendMessageW(Ctrl(id), EM_SETLIMITTEXT, multiline ? 16384 : 8192, 0);
 }
 void Button(const wchar_t *text, int id, int tab, int x, int y, int w = 84) {
-    Field(L"BUTTON", text, WS_TABSTOP | BS_PUSHBUTTON, id, tab, x, y, w, 29);
+    Field(L"BUTTON", text, WS_TABSTOP | BS_OWNERDRAW, id, tab, x, y, w, 36);
 }
 void Choices(int id, int tab, int x, int y, int w, const std::vector<std::wstring> &items) {
-    Field(L"COMBOBOX", L"", WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL, id, tab, x, y, w, 200);
+    Field(L"COMBOBOX", L"",
+          WS_TABSTOP | CBS_DROPDOWNLIST | CBS_OWNERDRAWFIXED | CBS_HASSTRINGS | WS_VSCROLL, id, tab,
+          x, y, w, 240);
+    SendMessageW(Ctrl(id), CB_SETITEMHEIGHT, -1, E(30));
+    SendMessageW(Ctrl(id), CB_SETITEMHEIGHT, 0, E(30));
     for (const auto &s : items)
         SendMessageW(Ctrl(id), CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(s.c_str()));
 }
@@ -79,6 +103,7 @@ void TabVisibility() {
     int tab = TabCtrl_GetCurSel(Ctrl(IdTabs));
     for (const auto &[hwnd, page] : g_controls)
         ShowWindow(hwnd, (page < 0 || page == tab) ? SW_SHOW : SW_HIDE);
+    RedrawWindow(g_editor, nullptr, nullptr, RDW_ERASE | RDW_INVALIDATE | RDW_ALLCHILDREN);
 }
 void RebuildSources() {
     g_sourceNames.clear();
@@ -102,17 +127,7 @@ void RebuildCoins(int selected) {
                  std::clamp(selected, 0, static_cast<int>(g_draft.coins.size()) - 1), 0);
 }
 void CoinHint() {
-    const int i = Combo(IdCoinSource);
-    std::wstring hint = L"接口使用的币种代码";
-    if (i >= 0 && i < static_cast<int>(g_sourceNames.size())) {
-        const auto &name = g_sourceNames[i];
-        if (name == "coingecko")
-            hint = L"例如 bitcoin、ethereum、solana";
-        else if (name == "binance")
-            hint = L"例如 BTCUSDT、ETHUSDT、SOLUSDT";
-        else if (name == "okx")
-            hint = L"例如 BTC-USDT、ETH-USDT、SOL-USDT";
-    }
+    std::wstring hint = L"例如 BTCUSDT、ETHUSDT、SOLUSDT";
     SetWindowTextW(Ctrl(IdHint), hint.c_str());
 }
 void LoadCoin() {
@@ -140,6 +155,13 @@ void LoadSource() {
     Put(IdPricePath, s.pricePath);
     Put(IdChangePath, s.changePath);
     Put(IdOpenPath, s.openPath);
+    Put(IdHistoryUrl, s.historyUrl);
+    Put(IdHistoryPath, s.historyPricePath);
+    SendMessageW(Ctrl(IdSymbolStyle), CB_SETCURSEL, s.symbolStyle == "dashed" ? 1 : 0, 0);
+    std::string mappings;
+    for (const auto &[pair, id] : s.symbolMap)
+        mappings += pair + "=" + id + "\r\n";
+    Put(IdSymbolMap, mappings);
     std::string headers;
     for (const auto &[key, value] : s.headers)
         headers += key + ": " + value + "\r\n";
@@ -163,6 +185,9 @@ void ReadDisplay(ct::Config &c) {
     c.theme = theme == 1 ? "light" : theme == 2 ? "dark" : "system";
     c.currency = Value(IdCurrency);
     c.showChange = SendMessageW(Ctrl(IdShowChange), BM_GETCHECK, 0, 0) == BST_CHECKED;
+    static const std::vector<std::string> periods{"1h", "4h", "24h", "7d", "30d"};
+    const int p = Combo(IdChangePeriod);
+    c.changePeriod = periods.at(p >= 0 ? p : 2);
 }
 void UpdateCoin(bool add) {
     auto copy = g_draft;
@@ -198,6 +223,19 @@ void UpdateSource(bool add) {
     }
     ct::Require((!add && name == old) || !copy.sources.count(name), "该数据源名称已存在。");
     ct::Source s{Value(IdUrl), Value(IdPricePath), Value(IdChangePath), Value(IdOpenPath), {}};
+    s.historyUrl = Value(IdHistoryUrl);
+    s.historyPricePath = Value(IdHistoryPath);
+    s.symbolStyle = Combo(IdSymbolStyle) == 1 ? "dashed" : "plain";
+    std::istringstream mapLines(Value(IdSymbolMap));
+    std::string mapping;
+    while (std::getline(mapLines, mapping)) {
+        mapping = Trim(mapping);
+        if (mapping.empty())
+            continue;
+        auto p = mapping.find('=');
+        ct::Require(p != std::string::npos, "代码映射格式：BTCUSDT=bitcoin");
+        s.symbolMap[ct::CanonicalPair(Trim(mapping.substr(0, p)))] = Trim(mapping.substr(p + 1));
+    }
     std::istringstream lines(Value(IdHeaders));
     std::string line;
     while (std::getline(lines, line)) {
@@ -232,21 +270,28 @@ void EditorTheme() {
     DwmSetWindowAttribute(g_editor, 20, &dark, sizeof(dark));
     RedrawWindow(g_editor, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
 }
+#include "settings_style.hpp"
+
 LRESULT CALLBACK EditorProc(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
     switch (msg) {
     case WM_ERASEBKGND: {
-        HDC dc = reinterpret_cast<HDC>(w);
-        RECT r{};
-        GetClientRect(hwnd, &r);
-        SetDCBrushColor(dc, g_dark ? RGB(31, 34, 40) : RGB(249, 250, 252));
-        FillRect(dc, &r, reinterpret_cast<HBRUSH>(GetStockObject(DC_BRUSH)));
+        DrawSettingsBackground(reinterpret_cast<HDC>(w));
         return 1;
+    }
+    case WM_DRAWITEM:
+        DrawSettingsItem(reinterpret_cast<DRAWITEMSTRUCT *>(l));
+        return TRUE;
+    case WM_MEASUREITEM: {
+        auto *item = reinterpret_cast<MEASUREITEMSTRUCT *>(l);
+        item->itemHeight =
+            E(item->CtlType == ODT_LISTBOX ? (item->CtlID == IdCoinList ? 58 : 44) : 32);
+        return TRUE;
     }
     case WM_CTLCOLORSTATIC:
     case WM_CTLCOLOREDIT:
     case WM_CTLCOLORLISTBOX: {
         HDC dc = reinterpret_cast<HDC>(w);
-        const auto bg = g_dark ? RGB(31, 34, 40) : RGB(249, 250, 252);
+        const auto bg = msg == WM_CTLCOLORSTATIC ? UiBackground() : UiSurface();
         SetTextColor(dc, g_dark ? RGB(240, 242, 246) : RGB(24, 29, 37));
         SetBkColor(dc, bg);
         SetDCBrushColor(dc, bg);
@@ -292,7 +337,9 @@ LRESULT CALLBACK EditorProc(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
         if (code != BN_CLICKED)
             return 0;
         try {
-            if (id == IdCoinAdd)
+            if (id == IdUpColor || id == IdDownColor)
+                ChooseSettingColor(id);
+            else if (id == IdCoinAdd)
                 UpdateCoin(true);
             else if (id == IdCoinUpdate)
                 UpdateCoin(false);
@@ -349,122 +396,17 @@ LRESULT CALLBACK EditorProc(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
     case WM_DESTROY:
         g_editor = nullptr;
         g_controls.clear();
+        g_fieldBoxes.clear();
         if (g_editFont) {
             DeleteObject(g_editFont);
             g_editFont = nullptr;
+        }
+        if (g_labelFont) {
+            DeleteObject(g_labelFont);
+            g_labelFont = nullptr;
         }
         return 0;
     }
     return DefWindowProcW(hwnd, msg, w, l);
 }
-void OpenEditor() {
-    if (g_editor) {
-        SetWindowPos(g_editor, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
-        SetForegroundWindow(g_editor);
-        return;
-    }
-    g_draft = Config();
-    g_controls.clear();
-    g_loading = true;
-    WNDCLASSW cls{};
-    cls.lpfnWndProc = EditorProc;
-    cls.hInstance = g_instance;
-    cls.lpszClassName = L"CryptoTaskbar.Settings.v2";
-    cls.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-    RegisterClassW(&cls);
-    const DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU;
-    RECT r{0, 0, Px(760), Px(574)};
-    AdjustWindowRectEx(&r, style, FALSE, 0);
-    g_editor = CreateWindowExW(0, cls.lpszClassName, L"Crypto Taskbar — 配置", style, CW_USEDEFAULT,
-                               CW_USEDEFAULT, r.right - r.left, r.bottom - r.top, g_overlay,
-                               nullptr, g_instance, nullptr);
-    if (!g_editor) {
-        g_loading = false;
-        return;
-    }
-    g_editFont = CreateFontW(-E(14), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
-                             OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                             DEFAULT_PITCH, L"Segoe UI");
-    Field(WC_TABCONTROLW, L"", WS_TABSTOP, IdTabs, -1, 16, 12, 728, 32);
-    for (const auto *name : {L"币种", L"数据源", L"显示"}) {
-        TCITEMW item{};
-        item.mask = TCIF_TEXT;
-        item.pszText = const_cast<wchar_t *>(name);
-        TabCtrl_InsertItem(Ctrl(IdTabs), TabCtrl_GetItemCount(Ctrl(IdTabs)), &item);
-    }
-    Field(L"LISTBOX", L"", WS_BORDER | WS_TABSTOP | LBS_NOTIFY | WS_VSCROLL | LBS_NOINTEGRALHEIGHT,
-          IdCoinList, 0, 20, 62, 252, 424);
-    Label(L"显示名称", 0, 300, 66);
-    Edit(IdLabel, 0, 300, 90, 420);
-    Label(L"数据源", 0, 300, 132);
-    Choices(IdCoinSource, 0, 300, 156, 420, {});
-    Label(L"币种代码", 0, 300, 198);
-    Edit(IdSymbol, 0, 300, 222, 420);
-    Field(L"STATIC", L"", 0, IdHint, 0, 300, 254, 420, 22);
-    Button(L"添加", IdCoinAdd, 0, 300, 302);
-    Button(L"更新", IdCoinUpdate, 0, 396, 302);
-    Button(L"删除", IdCoinDelete, 0, 20, 496, 76);
-    Button(L"上移", IdUp, 0, 104, 496, 76);
-    Button(L"下移", IdDown, 0, 188, 496, 76);
-    Field(L"LISTBOX", L"", WS_BORDER | WS_TABSTOP | LBS_NOTIFY | WS_VSCROLL | LBS_NOINTEGRALHEIGHT,
-          IdSourceList, 1, 20, 62, 220, 424);
-    Label(L"名称", 1, 264, 60);
-    Edit(IdSourceName, 1, 264, 82, 456);
-    Label(L"接口 URL", 1, 264, 116);
-    Edit(IdUrl, 1, 264, 138, 456);
-    Label(L"价格路径", 1, 264, 172);
-    Edit(IdPricePath, 1, 264, 194, 456);
-    Label(L"24 小时涨跌幅路径（可选）", 1, 264, 228);
-    Edit(IdChangePath, 1, 264, 250, 456);
-    Label(L"24 小时开盘价路径（可选）", 1, 264, 284);
-    Edit(IdOpenPath, 1, 264, 306, 456);
-    Label(L"请求头（每行 名称: 值，可使用 %环境变量%）", 1, 264, 340);
-    Edit(IdHeaders, 1, 264, 362, 456, 88, true);
-    Button(L"添加", IdSourceAdd, 1, 264, 468);
-    Button(L"更新", IdSourceUpdate, 1, 360, 468);
-    Button(L"删除", IdSourceDelete, 1, 20, 496);
-    const std::vector<std::pair<const wchar_t *, int>> fields{
-        {L"行情刷新（秒）", IdRefreshSeconds},
-        {L"轮播间隔（秒）", IdRotationSeconds},
-        {L"显示宽度", IdWidth},
-        {L"边缘距离", IdOffset},
-        {L"价格前缀", IdCurrency}};
-    int y = 74;
-    for (const auto &[name, id] : fields) {
-        Label(name, 2, 32, y, 200);
-        Edit(id, 2, 240, y - 3, 180);
-        y += 50;
-    }
-    Label(L"显示位置", 2, 32, 324, 200);
-    Choices(IdPosition, 2, 240, 321, 180, {L"任务栏左侧", L"系统托盘左侧"});
-    Label(L"主题", 2, 32, 374, 200);
-    Choices(IdTheme, 2, 240, 371, 180, {L"跟随系统", L"浅色", L"深色"});
-    Field(L"BUTTON", L"任务栏同时显示涨跌幅", WS_TABSTOP | BS_AUTOCHECKBOX, IdShowChange, 2, 32,
-          430, 330, 28);
-    Button(L"保存", IdSave, -1, 548, 534);
-    Button(L"取消", IdCancel, -1, 644, 534);
-    RebuildSources();
-    RebuildCoins(0);
-    LoadCoin();
-    SendMessageW(Ctrl(IdSourceList), LB_SETCURSEL, 0, 0);
-    LoadSource();
-    Put(IdRefreshSeconds, std::to_string(g_draft.refreshSeconds));
-    Put(IdRotationSeconds, std::to_string(g_draft.rotationSeconds));
-    Put(IdWidth, std::to_string(g_draft.width));
-    Put(IdOffset, std::to_string(g_draft.offset));
-    Put(IdCurrency, g_draft.currency);
-    SendMessageW(Ctrl(IdPosition), CB_SETCURSEL, g_draft.position == "right" ? 1 : 0, 0);
-    SendMessageW(Ctrl(IdTheme), CB_SETCURSEL,
-                 g_draft.theme == "light"  ? 1
-                 : g_draft.theme == "dark" ? 2
-                                           : 0,
-                 0);
-    SendMessageW(Ctrl(IdShowChange), BM_SETCHECK, g_draft.showChange ? BST_CHECKED : BST_UNCHECKED,
-                 0);
-    TabVisibility();
-    g_loading = false;
-    EditorTheme();
-    SetWindowPos(g_editor, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
-    SetForegroundWindow(g_editor);
-    SetFocus(Ctrl(IdCoinList));
-}
+#include "settings_layout.hpp"
