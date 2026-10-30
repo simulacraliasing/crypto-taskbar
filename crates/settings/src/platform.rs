@@ -7,29 +7,29 @@ pub fn show_window(window: &mut Window, inspect: bool) {
     #[cfg(windows)]
     unsafe {
         use windows_sys::Win32::UI::WindowsAndMessaging::*;
-        if let Ok(handle) = raw_window_handle::HasWindowHandle::window_handle(window) {
-            if let raw_window_handle::RawWindowHandle::Win32(handle) = handle.as_raw() {
-                let hwnd = handle.hwnd.get() as windows_sys::Win32::Foundation::HWND;
-                let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
-                SetWindowLongPtrW(
-                    hwnd,
-                    GWL_EXSTYLE,
-                    if inspect {
-                        (style & !(WS_EX_TOOLWINDOW as isize)) | WS_EX_APPWINDOW as isize
-                    } else {
-                        (style & !(WS_EX_APPWINDOW as isize)) | WS_EX_TOOLWINDOW as isize
-                    },
-                );
-                SetWindowPos(
-                    hwnd,
-                    std::ptr::null_mut(),
-                    0,
-                    0,
-                    0,
-                    0,
-                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED,
-                );
-            }
+        if let Ok(handle) = raw_window_handle::HasWindowHandle::window_handle(window)
+            && let raw_window_handle::RawWindowHandle::Win32(handle) = handle.as_raw()
+        {
+            let hwnd = handle.hwnd.get() as windows_sys::Win32::Foundation::HWND;
+            let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+            SetWindowLongPtrW(
+                hwnd,
+                GWL_EXSTYLE,
+                if inspect {
+                    (style & !(WS_EX_TOOLWINDOW as isize)) | WS_EX_APPWINDOW as isize
+                } else {
+                    (style & !(WS_EX_APPWINDOW as isize)) | WS_EX_TOOLWINDOW as isize
+                },
+            );
+            SetWindowPos(
+                hwnd,
+                std::ptr::null_mut(),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED,
+            );
         }
     }
     // Let GPUI apply its saved initial bounds and initialize the render surface.
@@ -81,7 +81,7 @@ pub fn system_dark() -> bool {
             &mut value as *mut _ as *mut std::ffi::c_void,
             &mut size,
         );
-        return value == 0;
+        value == 0
     }
     #[cfg(not(windows))]
     false

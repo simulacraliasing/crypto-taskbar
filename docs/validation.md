@@ -3,7 +3,7 @@
 Rust 2.0.0 迁移，2026-10-30，Windows 11 x64（Build 26300）、Rust 1.95.0、Visual Studio 2022。
 
 - 14 个核心及行情测试通过：旧配置迁移、交易对和数据源映射、五个周期、历史涨跌幅、批量 URL、数字与 JSON Pointer、颜色、环境变量请求头、配置备份、无效或超大配置不覆盖原文件，以及行情失败恢复、限流等待和取消请求。
-- 核心与任务栏代码通过 `cargo clippy --all-targets -- -D warnings`；配置界面使用 GPUI Kit 0.8.1 和 GPUI 0.3.10，依赖由 Cargo.lock 固定。
+- 核心、任务栏及 GPUI 配置代码通过 `cargo clippy --all-targets -- -D warnings`；配置界面使用 GPUI Kit 0.8.1 和 GPUI 0.3.10，依赖由 Cargo.lock 固定。
 - 使用程序实际 WinHTTP 客户端查询 Binance、OKX 的 1h、4h、24h、7d、30d，价格和涨跌幅均有效，历史 K 线时间与请求起点一致。CoinGecko 24h 通过，默认源不支持的其他周期显示缺失值。
 - 使用独立配置实测 Rust 任务栏：真实行情、价格后显示涨跌幅、空白区域右键菜单、悬停展开完整列表。
 - 实测 GPUI Kit 三个页面、深浅色切换和五个周期下拉。0 秒刷新被拒绝，配置文件摘要不变；有效保存后，60 秒刷新、1h、浅色和数据源重命名均正确回读，币种引用同步更新，备份摘要与原文件一致。
