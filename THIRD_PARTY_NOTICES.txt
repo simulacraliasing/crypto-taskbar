@@ -1,4 +1,4 @@
-Third-party dependency notices - Crypto Taskbar 2.0.0
+Third-party dependency notices - Crypto Taskbar 2.0.1
 Cargo.lock dependencies, including build tools and other platforms.
 Where offered, this distribution uses the MIT or Apache-2.0 alternative.
 

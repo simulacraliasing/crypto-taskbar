@@ -1147,7 +1147,7 @@ dependencies = [
 
 [[package]]
 name = "crypto-taskbar"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "anyhow",
  "crypto-taskbar-core",
@@ -1158,7 +1158,7 @@ dependencies = [
 
 [[package]]
 name = "crypto-taskbar-core"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "anyhow",
  "serde",
@@ -1168,7 +1168,7 @@ dependencies = [
 
 [[package]]
 name = "crypto-taskbar-settings"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "anyhow",
  "crypto-taskbar-core",

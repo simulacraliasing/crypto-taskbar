@@ -81,6 +81,7 @@ struct App {
     reload: u32,
     taskbar_created: u32,
     inspect: bool,
+    suspended: bool,
 }
 impl App {
     fn snapshot(&self) -> Snapshot {
@@ -318,6 +319,9 @@ impl App {
         p.present(hwnd);
     }
     unsafe fn show_popup(&mut self, pinned: bool) {
+        if self.suspended || IsWindowVisible(self.overlay) == 0 {
+            return;
+        }
         self.pinned = pinned;
         let c = self.snapshot().config;
         let rows = self.rows().min(c.coins.len());
@@ -345,36 +349,18 @@ impl App {
         self.render(self.popup);
     }
     unsafe fn fullscreen(&self) -> bool {
-        let fg = GetForegroundWindow();
-        if fg.is_null() || fg == self.overlay || fg == self.popup || fg == GetShellWindow() {
-            return false;
-        }
-        if self.settings.as_ref().is_some_and(|c| {
-            let mut pid = 0;
-            GetWindowThreadProcessId(fg, &mut pid);
-            pid == c.id()
-        }) {
-            return false;
-        }
-        let mut class = [0u16; 64];
-        let n = GetClassNameW(fg, class.as_mut_ptr(), 64);
-        let class = String::from_utf16_lossy(&class[..n.max(0) as usize]);
-        if ["Shell_TrayWnd", "WorkerW", "Progman"].contains(&class.as_str()) {
-            return false;
-        }
-        let monitor = MonitorFromWindow(fg, MONITOR_DEFAULTTOPRIMARY);
-        if monitor != MonitorFromRect(&self.bar, MONITOR_DEFAULTTOPRIMARY) {
-            return false;
-        }
-        let mut info: MONITORINFO = std::mem::zeroed();
-        info.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
-        GetMonitorInfoW(monitor, &mut info);
-        let mut r: RECT = std::mem::zeroed();
-        GetWindowRect(fg, &mut r);
-        r.left <= info.rcMonitor.left
-            && r.top <= info.rcMonitor.top
-            && r.right >= info.rcMonitor.right
-            && r.bottom >= info.rcMonitor.bottom
+        crypto_taskbar::fullscreen::on_monitor(MonitorFromRect(&self.bar, MONITOR_DEFAULTTOPRIMARY))
+    }
+    unsafe fn hide(&mut self) {
+        self.suspended = true;
+        self.pinned = false;
+        self.hover = None;
+        self.leave = None;
+        self.animating = false;
+        self.rotated = Instant::now();
+        KillTimer(self.overlay, 2);
+        ShowWindow(self.overlay, SW_HIDE);
+        ShowWindow(self.popup, SW_HIDE);
     }
     unsafe fn place(&mut self) {
         if self.menu_open {
@@ -382,8 +368,7 @@ impl App {
         }
         let taskbar = FindWindowW(wide("Shell_TrayWnd").as_ptr(), null());
         if taskbar.is_null() || GetWindowRect(taskbar, &mut self.bar) == 0 {
-            ShowWindow(self.overlay, SW_HIDE);
-            ShowWindow(self.popup, SW_HIDE);
+            self.hide();
             return;
         }
         let scale = GetDpiForWindow(taskbar) as f32 / 96.;
@@ -401,10 +386,10 @@ impl App {
             || self.bar.top < info.rcMonitor.top + (info.rcMonitor.bottom - info.rcMonitor.top) / 2
             || self.bar.top >= info.rcMonitor.bottom - 2
         {
-            ShowWindow(self.overlay, SW_HIDE);
-            ShowWindow(self.popup, SW_HIDE);
+            self.hide();
             return;
         }
+        self.suspended = false;
         let c = self.snapshot().config;
         let width = self.px(c.width as f32).min(self.bar.right - self.bar.left);
         let height = self.px(46.).min(self.bar.bottom - self.bar.top);
@@ -487,7 +472,7 @@ impl App {
         GetCursorPos(&mut point);
         let over = contains(self.overlay, point);
         let in_list = contains(self.popup, point);
-        if self.settings.is_some() {
+        if self.suspended || self.settings.is_some() {
             return;
         }
         if over {
@@ -1003,6 +988,7 @@ pub fn run(options: Options) -> Result<()> {
                 reload: RegisterWindowMessageW(wide("CryptoTaskbar.ReloadConfig.v2").as_ptr()),
                 taskbar_created: RegisterWindowMessageW(wide("TaskbarCreated").as_ptr()),
                 inspect: options.inspect,
+                suspended: true,
             });
         });
         UI.with(|cell| {
