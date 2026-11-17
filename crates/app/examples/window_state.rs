@@ -19,6 +19,7 @@ unsafe extern "system" fn inspect(hwnd: HWND, _: LPARAM) -> i32 {
             && !class.starts_with("Chrome_")
             && !class.starts_with("CryptoTaskbar")
             && class != "Shell_TrayWnd"
+            && class != "Shell_SecondaryTrayWnd"
         {
             return 1;
         }
@@ -53,5 +54,17 @@ fn main() {
             "fullscreen_on_taskbar_monitor={}",
             crypto_taskbar::fullscreen::on_monitor(monitor)
         );
+        for taskbar in crypto_taskbar::taskbars::discover() {
+            let monitor = MonitorFromWindow(taskbar, MONITOR_DEFAULTTOPRIMARY);
+            let mut info: MONITORINFO = std::mem::zeroed();
+            info.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
+            GetMonitorInfoW(monitor, &mut info);
+            println!(
+                "{}",
+                serde_json::json!({"taskbar":taskbar as isize,
+                "monitor":[info.rcMonitor.left,info.rcMonitor.top,info.rcMonitor.right,info.rcMonitor.bottom],
+                "fullscreen":crypto_taskbar::fullscreen::on_monitor(monitor)})
+            );
+        }
     }
 }

@@ -95,3 +95,17 @@ fn only_small_dpi_rounding_error_is_tolerated() {
     assert!(!detect(screen, [window(bounds(-2880, -1800, 0, -96))]));
     assert!(!detect(screen, [window(bounds(0, 0, 3840, 2160))]));
 }
+#[test]
+fn fullscreen_on_one_monitor_leaves_the_other_monitor_available() {
+    let primary = bounds(0, 0, 3840, 2160);
+    let secondary = bounds(-2880, 0, 0, 1800);
+    let windows = [window(secondary), window(bounds(0, 0, 3840, 2088))];
+    assert!(detect(secondary, windows));
+    assert!(!detect(primary, windows));
+    let exited = [
+        window(bounds(-2880, 0, 0, 1704)),
+        window(bounds(0, 0, 3840, 2088)),
+    ];
+    assert!(!detect(secondary, exited));
+    assert!(!detect(primary, exited));
+}

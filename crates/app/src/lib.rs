@@ -3,3 +3,5 @@ pub mod engine;
 pub mod fullscreen;
 #[cfg(windows)]
 pub mod http;
+#[cfg(windows)]
+pub mod taskbars;

@@ -11,6 +11,7 @@ use std::{
     path::PathBuf,
     process::{Child, Command},
     ptr::{null, null_mut},
+    rc::Rc,
     time::{Duration, Instant, SystemTime},
 };
 use windows_sys::Win32::{
@@ -28,7 +29,7 @@ const SETTINGS: u32 = 102;
 const STARTUP: u32 = 103;
 const EXIT: u32 = 104;
 const FOLDER: u32 = 105;
-thread_local! { static UI:RefCell<Option<App>>=const {RefCell::new(None)}; }
+thread_local! { static UI:RefCell<Option<Controller>>=const {RefCell::new(None)}; }
 fn wide(text: &str) -> Vec<u16> {
     text.encode_utf16().chain(Some(0)).collect()
 }
@@ -53,15 +54,133 @@ pub struct Options {
     pub test: bool,
     pub inspect: bool,
 }
+struct Controller {
+    window: HWND,
+    class: Vec<u16>,
+    path: PathBuf,
+    engine: Rc<Engine>,
+    settings: Rc<RefCell<Option<Child>>>,
+    displays: Vec<App>,
+    modified: Option<SystemTime>,
+    last_check: Instant,
+    reload: u32,
+    taskbar_created: u32,
+    preview: Option<bool>,
+    inspect: bool,
+}
+impl Controller {
+    unsafe fn sync_taskbars(&mut self) -> Result<()> {
+        let taskbars = crypto_taskbar::taskbars::discover();
+        self.displays.retain_mut(|display| {
+            if taskbars.contains(&display.taskbar) {
+                true
+            } else {
+                display.destroy();
+                false
+            }
+        });
+        for taskbar in taskbars {
+            if !self
+                .displays
+                .iter()
+                .any(|display| display.taskbar == taskbar)
+            {
+                let mut display = App::new(taskbar, self)?;
+                display.place();
+                display.render(display.overlay);
+                if self.preview.is_some() {
+                    SetTimer(display.overlay, 99, 350, None);
+                }
+                self.displays.push(display);
+            }
+        }
+        Ok(())
+    }
+    unsafe fn redraw(&mut self) {
+        for display in &mut self.displays {
+            display.place();
+            display.render(display.overlay);
+            if IsWindowVisible(display.popup) != 0 {
+                display.show_popup(display.pinned);
+            }
+        }
+    }
+    unsafe fn reload_config(&mut self) {
+        self.modified = std::fs::metadata(&self.path)
+            .and_then(|m| m.modified())
+            .ok();
+        match Config::load(&self.path) {
+            Ok(config) => {
+                self.engine.apply(config.clone());
+                for display in &mut self.displays {
+                    display.initial = config.clone();
+                    display.coin = 0;
+                    display.scroll = 0;
+                    display.animating = false;
+                    display.rotated = Instant::now();
+                    display.config_error = None;
+                    KillTimer(display.overlay, 2);
+                }
+                self.redraw();
+            }
+            Err(error) => {
+                for display in &mut self.displays {
+                    display.config_error = Some(error.to_string());
+                }
+            }
+        }
+    }
+    unsafe fn tick(&mut self) {
+        if self.last_check.elapsed() >= Duration::from_secs(1) {
+            self.last_check = Instant::now();
+            let _ = self.sync_taskbars();
+            let modified = std::fs::metadata(&self.path)
+                .and_then(|m| m.modified())
+                .ok();
+            if modified != self.modified {
+                self.reload_config();
+            }
+        }
+        let settings_closed = self
+            .settings
+            .borrow_mut()
+            .as_mut()
+            .is_some_and(|child| child.try_wait().ok().flatten().is_some());
+        if settings_closed {
+            *self.settings.borrow_mut() = None;
+        }
+        for display in &mut self.displays {
+            display.tick();
+        }
+    }
+    unsafe fn display_at_cursor(&mut self) -> Option<&mut App> {
+        let mut point: POINT = std::mem::zeroed();
+        GetCursorPos(&mut point);
+        let monitor = MonitorFromPoint(point, MONITOR_DEFAULTTOPRIMARY);
+        let index = self
+            .displays
+            .iter()
+            .position(|display| {
+                MonitorFromWindow(display.taskbar, MONITOR_DEFAULTTOPRIMARY) == monitor
+            })
+            .unwrap_or(0);
+        self.displays.get_mut(index)
+    }
+    unsafe fn hide_all(&mut self) {
+        for display in &mut self.displays {
+            display.hide();
+        }
+    }
+}
 struct App {
+    taskbar: HWND,
     overlay: HWND,
     popup: HWND,
     class: Vec<u16>,
     path: PathBuf,
     initial: Config,
-    engine: Option<Engine>,
-    settings: Option<Child>,
-    modified: Option<SystemTime>,
+    engine: Option<Rc<Engine>>,
+    settings: Rc<RefCell<Option<Child>>>,
     scale: f32,
     dark: bool,
     bar: RECT,
@@ -76,18 +195,51 @@ struct App {
     pinned: bool,
     menu_open: bool,
     preview: Option<bool>,
-    last_check: Instant,
     config_error: Option<String>,
-    reload: u32,
-    taskbar_created: u32,
     inspect: bool,
     suspended: bool,
 }
 impl App {
+    unsafe fn new(taskbar: HWND, controller: &Controller) -> Result<Self> {
+        let (overlay, popup) = create_windows(&controller.class, controller.inspect)?;
+        Ok(Self {
+            taskbar,
+            overlay,
+            popup,
+            class: controller.class.clone(),
+            path: controller.path.clone(),
+            initial: controller.engine.snapshot().config,
+            engine: Some(controller.engine.clone()),
+            settings: controller.settings.clone(),
+            scale: 1.,
+            dark: true,
+            bar: std::mem::zeroed(),
+            work: std::mem::zeroed(),
+            coin: 0,
+            scroll: 0,
+            wheel: 0,
+            rotated: Instant::now(),
+            animating: false,
+            hover: None,
+            leave: None,
+            pinned: false,
+            menu_open: false,
+            preview: controller.preview,
+            config_error: None,
+            inspect: controller.inspect,
+            suspended: true,
+        })
+    }
+    unsafe fn destroy(&mut self) {
+        self.hide();
+        KillTimer(self.overlay, 99);
+        DestroyWindow(self.popup);
+        DestroyWindow(self.overlay);
+    }
     fn snapshot(&self) -> Snapshot {
         self.engine
             .as_ref()
-            .map(Engine::snapshot)
+            .map(|engine| engine.snapshot())
             .unwrap_or_else(|| Snapshot {
                 config: self.initial.clone(),
                 quotes: vec![Default::default(); self.initial.coins.len()],
@@ -366,8 +518,11 @@ impl App {
         if self.menu_open {
             return;
         }
-        let taskbar = FindWindowW(wide("Shell_TrayWnd").as_ptr(), null());
-        if taskbar.is_null() || GetWindowRect(taskbar, &mut self.bar) == 0 {
+        let taskbar = self.taskbar;
+        if IsWindow(taskbar) == 0
+            || IsWindowVisible(taskbar) == 0
+            || GetWindowRect(taskbar, &mut self.bar) == 0
+        {
             self.hide();
             return;
         }
@@ -381,37 +536,41 @@ impl App {
             &mut info,
         );
         self.work = info.rcWork;
-        if self.preview.is_none() && self.fullscreen()
-            || self.bar.bottom - self.bar.top > self.px(100.)
-            || self.bar.top < info.rcMonitor.top + (info.rcMonitor.bottom - info.rcMonitor.top) / 2
-            || self.bar.top >= info.rcMonitor.bottom - 2
-        {
+        if self.preview.is_none() && self.fullscreen() {
             self.hide();
             return;
         }
-        self.suspended = false;
         let c = self.snapshot().config;
-        let width = self.px(c.width as f32).min(self.bar.right - self.bar.left);
-        let height = self.px(46.).min(self.bar.bottom - self.bar.top);
-        let mut x = self.bar.left + self.px(c.offset as f32);
-        if c.position == "right" {
+        let right = if c.position == "right" {
             let tray = FindWindowExW(taskbar, null_mut(), wide("TrayNotifyWnd").as_ptr(), null());
             let mut r: RECT = std::mem::zeroed();
-            let right = if !tray.is_null() && GetWindowRect(tray, &mut r) != 0 {
+            Some(if !tray.is_null() && GetWindowRect(tray, &mut r) != 0 {
                 r.left
             } else {
                 self.bar.right - self.px(220.)
-            };
-            x = right - self.px((c.offset + c.width) as f32);
-        }
-        x = x.clamp(self.bar.left, (self.bar.right - width).max(self.bar.left));
+            })
+        } else {
+            None
+        };
+        let Some(rect) = crypto_taskbar::taskbars::place(
+            self.bar.into(),
+            info.rcMonitor.into(),
+            GetDpiForWindow(taskbar),
+            c.width,
+            c.offset,
+            right,
+        ) else {
+            self.hide();
+            return;
+        };
+        self.suspended = false;
         SetWindowPos(
             self.overlay,
             HWND_TOPMOST,
-            x,
-            self.bar.top + (self.bar.bottom - self.bar.top - height) / 2,
-            width,
-            height,
+            rect.left,
+            rect.top,
+            rect.right - rect.left,
+            rect.bottom - rect.top,
             SWP_NOACTIVATE | SWP_SHOWWINDOW,
         );
         let dark = self.preview.unwrap_or_else(|| match c.theme.as_str() {
@@ -427,52 +586,16 @@ impl App {
             }
         }
     }
-    unsafe fn reload(&mut self) {
-        self.modified = std::fs::metadata(&self.path)
-            .and_then(|m| m.modified())
-            .ok();
-        match Config::load(&self.path) {
-            Ok(config) => {
-                self.initial = config.clone();
-                if let Some(engine) = &self.engine {
-                    engine.apply(config);
-                }
-                self.coin = 0;
-                self.scroll = 0;
-                self.animating = false;
-                self.rotated = Instant::now();
-                KillTimer(self.overlay, 2);
-                self.config_error = None;
-                self.place();
-                self.render(self.overlay);
-            }
-            Err(e) => self.config_error = Some(e.to_string()),
-        }
-    }
     unsafe fn tick(&mut self) {
         if self.menu_open {
             return;
         }
         self.place();
-        if self.last_check.elapsed() > Duration::from_secs(1) {
-            self.last_check = Instant::now();
-            let modified = std::fs::metadata(&self.path)
-                .and_then(|m| m.modified())
-                .ok();
-            if modified != self.modified {
-                self.reload();
-            }
-        }
-        if let Some(child) = &mut self.settings
-            && child.try_wait().ok().flatten().is_some()
-        {
-            self.settings = None;
-        }
         let mut point: POINT = std::mem::zeroed();
         GetCursorPos(&mut point);
         let over = contains(self.overlay, point);
         let in_list = contains(self.popup, point);
-        if self.suspended || self.settings.is_some() {
+        if self.suspended || self.settings.borrow().is_some() {
             return;
         }
         if over {
@@ -505,7 +628,7 @@ impl App {
         }
     }
     unsafe fn open_settings(&mut self) {
-        if let Some(child) = &mut self.settings
+        if let Some(child) = &mut *self.settings.borrow_mut()
             && child.try_wait().ok().flatten().is_none()
         {
             let hwnd = process_window(child.id());
@@ -537,7 +660,7 @@ impl App {
                 .spawn()?)
         })();
         match result {
-            Ok(child) => self.settings = Some(child),
+            Ok(child) => *self.settings.borrow_mut() = Some(child),
             Err(error) => message(&error.to_string()),
         }
     }
@@ -726,159 +849,230 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM
         let Ok(mut guard) = cell.try_borrow_mut() else {
             return DefWindowProcW(hwnd, msg, w, l);
         };
-        let Some(app) = guard.as_mut() else {
+        let Some(controller) = guard.as_mut() else {
             return DefWindowProcW(hwnd, msg, w, l);
         };
-        if msg == app.reload {
-            app.reload();
+        if msg == controller.reload {
+            controller.reload_config();
             return 0;
         }
-        if msg == app.taskbar_created {
-            app.place();
-            app.render(app.overlay);
+        if msg == controller.taskbar_created {
+            let _ = controller.sync_taskbars();
+            controller.redraw();
             return 0;
         }
         match msg {
-            WM_MOUSEACTIVATE => {
-                if hwnd == app.popup {
-                    MA_ACTIVATE as isize
-                } else {
-                    MA_NOACTIVATE as isize
+            WM_TIMER if hwnd == controller.window => {
+                if w == 1 {
+                    controller.tick();
                 }
-            }
-            WM_NCHITTEST if hwnd == app.overlay => HTCLIENT as isize,
-            WM_ERASEBKGND => 1,
-            WM_PAINT => {
-                let mut paint = std::mem::zeroed();
-                BeginPaint(hwnd, &mut paint);
-                EndPaint(hwnd, &paint);
-                0
-            }
-            WM_TIMER => {
-                if hwnd == app.overlay {
-                    match w {
-                        1 => app.tick(),
-                        2 => {
-                            if app.rotated.elapsed() >= Duration::from_millis(260) {
-                                app.coin = (app.coin + 1) % app.snapshot().config.coins.len();
-                                app.rotated = Instant::now();
-                                app.animating = false;
-                                KillTimer(hwnd, 2);
-                            }
-                            app.render(hwnd);
-                        }
-                        99 => {
-                            app.show_popup(true);
-                            KillTimer(hwnd, 99);
-                        }
-                        _ => {}
-                    }
-                }
-                0
+                return 0;
             }
             UPDATED => {
-                app.place();
-                app.render(app.overlay);
-                if IsWindowVisible(app.popup) != 0 {
-                    app.show_popup(app.pinned);
-                }
-                0
+                controller.redraw();
+                return 0;
             }
             WM_SETTINGCHANGE | WM_THEMECHANGED | WM_DISPLAYCHANGE | WM_DPICHANGED => {
-                app.place();
-                app.render(app.overlay);
-                if IsWindowVisible(app.popup) != 0 {
-                    app.show_popup(app.pinned);
-                }
-                0
-            }
-            WM_LBUTTONUP => {
-                if hwnd == app.overlay {
-                    if app.pinned && IsWindowVisible(app.popup) != 0 {
-                        app.pinned = false;
-                        ShowWindow(app.popup, SW_HIDE);
-                    } else {
-                        app.show_popup(true);
-                    }
-                }
-                0
-            }
-            WM_RBUTTONUP | WM_CONTEXTMENU => {
-                app.menu();
-                0
-            }
-            WM_MOUSEWHEEL => {
-                let delta = ((w >> 16) as u16) as i16 as i32;
-                app.wheel += delta;
-                let steps = app.wheel / 120;
-                app.wheel %= 120;
-                if hwnd == app.popup {
-                    app.scroll = (app.scroll as i32 - steps * 3).max(0) as usize;
-                    app.render(hwnd);
-                } else if steps != 0 {
-                    let count = app.snapshot().config.coins.len() as i32;
-                    app.coin = (app.coin as i32 - steps).rem_euclid(count) as usize;
-                    app.animating = false;
-                    app.rotated = Instant::now();
-                    KillTimer(hwnd, 2);
-                    app.render(hwnd);
-                }
-                0
-            }
-            WM_KEYDOWN if hwnd == app.popup => {
-                match w as u32 {
-                    0x1b => {
-                        app.pinned = false;
-                        ShowWindow(hwnd, SW_HIDE);
-                    }
-                    0x26 => app.scroll = app.scroll.saturating_sub(1),
-                    0x28 => app.scroll += 1,
-                    0x21 => app.scroll = app.scroll.saturating_sub(app.rows()),
-                    0x22 => app.scroll += app.rows(),
-                    0x24 => app.scroll = 0,
-                    0x23 => app.scroll = 100,
-                    _ => {}
-                }
-                app.render(hwnd);
-                0
+                let _ = controller.sync_taskbars();
+                controller.redraw();
+                return 0;
             }
             OPEN_SETTINGS => {
-                app.open_settings();
-                0
+                if let Some(display) = controller.display_at_cursor() {
+                    display.open_settings();
+                }
+                return 0;
             }
             SHOW_LIST => {
-                app.place();
-                app.show_popup(true);
-                0
+                if let Some(display) = controller.display_at_cursor() {
+                    display.place();
+                    display.show_popup(true);
+                }
+                return 0;
             }
             WM_CLOSE => {
-                ShowWindow(app.overlay, SW_HIDE);
-                ShowWindow(app.popup, SW_HIDE);
+                controller.hide_all();
                 PostQuitMessage(0);
-                0
+                return 0;
             }
-            _ => DefWindowProcW(hwnd, msg, w, l),
+            _ => {}
         }
+        let Some(app) = controller
+            .displays
+            .iter_mut()
+            .find(|display| hwnd == display.overlay || hwnd == display.popup)
+        else {
+            return DefWindowProcW(hwnd, msg, w, l);
+        };
+        app_message(app, hwnd, msg, w, l)
     })
+}
+unsafe fn app_message(app: &mut App, hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {
+    match msg {
+        WM_MOUSEACTIVATE => {
+            if hwnd == app.popup {
+                MA_ACTIVATE as isize
+            } else {
+                MA_NOACTIVATE as isize
+            }
+        }
+        WM_NCHITTEST if hwnd == app.overlay => HTCLIENT as isize,
+        WM_ERASEBKGND => 1,
+        WM_PAINT => {
+            let mut paint = std::mem::zeroed();
+            BeginPaint(hwnd, &mut paint);
+            EndPaint(hwnd, &paint);
+            0
+        }
+        WM_TIMER => {
+            if hwnd == app.overlay {
+                match w {
+                    2 => {
+                        if app.rotated.elapsed() >= Duration::from_millis(260) {
+                            app.coin = (app.coin + 1) % app.snapshot().config.coins.len();
+                            app.rotated = Instant::now();
+                            app.animating = false;
+                            KillTimer(hwnd, 2);
+                        }
+                        app.render(hwnd);
+                    }
+                    99 => {
+                        app.show_popup(true);
+                        KillTimer(hwnd, 99);
+                    }
+                    _ => {}
+                }
+            }
+            0
+        }
+        WM_LBUTTONUP => {
+            if hwnd == app.overlay {
+                if app.pinned && IsWindowVisible(app.popup) != 0 {
+                    app.pinned = false;
+                    ShowWindow(app.popup, SW_HIDE);
+                } else {
+                    app.show_popup(true);
+                }
+            }
+            0
+        }
+        WM_RBUTTONUP | WM_CONTEXTMENU => {
+            app.menu();
+            0
+        }
+        WM_MOUSEWHEEL => {
+            let delta = ((w >> 16) as u16) as i16 as i32;
+            app.wheel += delta;
+            let steps = app.wheel / 120;
+            app.wheel %= 120;
+            if hwnd == app.popup {
+                app.scroll = (app.scroll as i32 - steps * 3).max(0) as usize;
+                app.render(hwnd);
+            } else if steps != 0 {
+                let count = app.snapshot().config.coins.len() as i32;
+                app.coin = (app.coin as i32 - steps).rem_euclid(count) as usize;
+                app.animating = false;
+                app.rotated = Instant::now();
+                KillTimer(hwnd, 2);
+                app.render(hwnd);
+            }
+            0
+        }
+        WM_KEYDOWN if hwnd == app.popup => {
+            match w as u32 {
+                0x1b => {
+                    app.pinned = false;
+                    ShowWindow(hwnd, SW_HIDE);
+                }
+                0x26 => app.scroll = app.scroll.saturating_sub(1),
+                0x28 => app.scroll += 1,
+                0x21 => app.scroll = app.scroll.saturating_sub(app.rows()),
+                0x22 => app.scroll += app.rows(),
+                0x24 => app.scroll = 0,
+                0x23 => app.scroll = 100,
+                _ => {}
+            }
+            app.render(hwnd);
+            0
+        }
+        _ => DefWindowProcW(hwnd, msg, w, l),
+    }
+}
+
+unsafe fn create_windows(class: &[u16], inspect: bool) -> Result<(HWND, HWND)> {
+    let instance = GetModuleHandleW(null());
+    let overlay = CreateWindowExW(
+        WS_EX_LAYERED
+            | if inspect {
+                WS_EX_APPWINDOW
+            } else {
+                WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE
+            },
+        class.as_ptr(),
+        wide("Crypto Taskbar").as_ptr(),
+        WS_POPUP,
+        0,
+        0,
+        1,
+        1,
+        null_mut(),
+        null_mut(),
+        instance,
+        null(),
+    );
+    ensure!(!overlay.is_null(), "无法创建行情窗口");
+    let popup = CreateWindowExW(
+        WS_EX_LAYERED
+            | if inspect {
+                WS_EX_APPWINDOW
+            } else {
+                WS_EX_TOOLWINDOW
+            },
+        class.as_ptr(),
+        wide("Crypto Taskbar — 自选行情").as_ptr(),
+        WS_POPUP,
+        0,
+        0,
+        1,
+        1,
+        overlay,
+        null_mut(),
+        instance,
+        null(),
+    );
+    if popup.is_null() {
+        DestroyWindow(overlay);
+        anyhow::bail!("无法创建行情列表");
+    }
+    Ok((overlay, popup))
 }
 
 pub fn run(options: Options) -> Result<()> {
     unsafe {
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-        let mutex_name = if options.test || options.preview.is_some() {
-            "Local\\CryptoTaskbar.RustTest"
-        } else {
-            "Local\\CryptoTaskbar.v1"
-        };
-        let class = wide(if options.test || options.preview.is_some() {
+        let test = options.test || options.preview.is_some();
+        let mutex = CreateMutexW(
+            null(),
+            0,
+            wide(if test {
+                r"Local\CryptoTaskbar.RustTest"
+            } else {
+                r"Local\CryptoTaskbar.v1"
+            })
+            .as_ptr(),
+        );
+        ensure!(!mutex.is_null(), "无法创建程序实例");
+        let class = wide(if test {
             "CryptoTaskbar.RustTest"
         } else {
             "CryptoTaskbar.Window.v1"
         });
-        let mutex = CreateMutexW(null(), 0, wide(mutex_name).as_ptr());
-        ensure!(!mutex.is_null(), "无法创建程序实例");
         if GetLastError() == ERROR_ALREADY_EXISTS {
-            let existing = FindWindowW(class.as_ptr(), null());
+            let mut existing =
+                FindWindowW(class.as_ptr(), wide("CryptoTaskbar.Controller").as_ptr());
+            if existing.is_null() {
+                existing = FindWindowW(class.as_ptr(), null());
+            }
             if !existing.is_null() {
                 PostMessageW(
                     existing,
@@ -898,9 +1092,9 @@ pub fn run(options: Options) -> Result<()> {
         let config = if options.path.exists() {
             Config::load(&options.path)?
         } else {
-            let config = Config::default();
-            config.save(&options.path)?;
-            config
+            let c = Config::default();
+            c.save(&options.path)?;
+            c
         };
         let modified = std::fs::metadata(&options.path)
             .and_then(|m| m.modified())
@@ -912,116 +1106,69 @@ pub fn run(options: Options) -> Result<()> {
         window_class.lpszClassName = class.as_ptr();
         window_class.hCursor = LoadCursorW(null_mut(), IDC_ARROW);
         ensure!(RegisterClassW(&window_class) != 0, "无法注册窗口");
-        let overlay = CreateWindowExW(
-            WS_EX_LAYERED
-                | if options.inspect {
-                    WS_EX_APPWINDOW
-                } else {
-                    WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE
-                },
+        // This hidden coordinator survives taskbar recreation and monitor removal.
+        let window = CreateWindowExW(
+            WS_EX_TOOLWINDOW,
             class.as_ptr(),
-            wide("Crypto Taskbar").as_ptr(),
+            wide("CryptoTaskbar.Controller").as_ptr(),
             WS_POPUP,
             0,
             0,
-            1,
-            1,
+            0,
+            0,
             null_mut(),
             null_mut(),
             instance,
             null(),
         );
-        let popup = CreateWindowExW(
-            WS_EX_LAYERED
-                | if options.inspect {
-                    WS_EX_APPWINDOW
-                } else {
-                    WS_EX_TOOLWINDOW
-                },
-            class.as_ptr(),
-            wide("Crypto Taskbar — 自选行情").as_ptr(),
-            WS_POPUP,
-            0,
-            0,
-            1,
-            1,
-            overlay,
-            null_mut(),
-            instance,
-            null(),
-        );
-        ensure!(!overlay.is_null() && !popup.is_null(), "无法创建行情窗口");
-        let notify_handle = overlay as isize;
-        let engine = if options.preview.is_some() {
-            Engine::demo(config.clone())
+        ensure!(!window.is_null(), "无法创建协调窗口");
+        let notify_handle = window as isize;
+        let engine = Rc::new(if options.preview.is_some() {
+            Engine::demo(config)
         } else {
-            Engine::new(config.clone(), move || {
+            Engine::new(config, move || {
                 PostMessageW(notify_handle as HWND, UPDATED, 0, 0);
             })
+        });
+        let mut controller = Controller {
+            window,
+            class: class.clone(),
+            path: options.path,
+            engine,
+            settings: Rc::new(RefCell::new(None)),
+            displays: Vec::new(),
+            modified,
+            last_check: Instant::now(),
+            reload: RegisterWindowMessageW(wide("CryptoTaskbar.ReloadConfig.v2").as_ptr()),
+            taskbar_created: RegisterWindowMessageW(wide("TaskbarCreated").as_ptr()),
+            preview: options.preview,
+            inspect: options.inspect,
         };
-        UI.with(|cell| {
-            *cell.borrow_mut() = Some(App {
-                overlay,
-                popup,
-                class: class.clone(),
-                path: options.path,
-                initial: config,
-                engine: Some(engine),
-                settings: None,
-                modified,
-                scale: 1.,
-                dark: true,
-                bar: std::mem::zeroed(),
-                work: std::mem::zeroed(),
-                coin: 0,
-                scroll: 0,
-                wheel: 0,
-                rotated: Instant::now(),
-                animating: false,
-                hover: None,
-                leave: None,
-                pinned: false,
-                menu_open: false,
-                preview: options.preview,
-                last_check: Instant::now(),
-                config_error: None,
-                reload: RegisterWindowMessageW(wide("CryptoTaskbar.ReloadConfig.v2").as_ptr()),
-                taskbar_created: RegisterWindowMessageW(wide("TaskbarCreated").as_ptr()),
-                inspect: options.inspect,
-                suspended: true,
-            });
-        });
-        UI.with(|cell| {
-            let mut guard = cell.borrow_mut();
-            let app = guard.as_mut().unwrap();
-            app.place();
-            app.render(overlay);
-            if options.settings {
-                app.open_settings();
-            }
-        });
-        SetTimer(overlay, 1, 150, None);
-        if options.preview.is_some() {
-            SetTimer(overlay, 99, 350, None);
+        controller.sync_taskbars()?;
+        UI.with(|cell| *cell.borrow_mut() = Some(controller));
+        if options.settings {
+            PostMessageW(window, OPEN_SETTINGS, 0, 0);
         }
+        SetTimer(window, 1, 150, None);
         let mut msg: MSG = std::mem::zeroed();
         while GetMessageW(&mut msg, null_mut(), 0, 0) > 0 {
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
-        UI.with(|cell| {
-            if let Some(mut app) = cell.borrow_mut().take() {
-                drop(app.engine.take());
-                if let Some(child) = &app.settings {
-                    let hwnd = process_window(child.id());
-                    if !hwnd.is_null() {
-                        PostMessageW(hwnd, WM_CLOSE, 0, 0);
-                    }
+        let state = UI.with(|cell| cell.borrow_mut().take());
+        if let Some(mut controller) = state {
+            if let Some(child) = &*controller.settings.borrow() {
+                let hwnd = process_window(child.id());
+                if !hwnd.is_null() {
+                    PostMessageW(hwnd, WM_CLOSE, 0, 0);
                 }
-                DestroyWindow(popup);
-                DestroyWindow(overlay);
             }
-        });
+            for display in &mut controller.displays {
+                display.destroy();
+            }
+            drop(controller);
+        }
+        DestroyWindow(window);
         UnregisterClassW(class.as_ptr(), instance);
         CloseHandle(mutex);
         Ok(())
