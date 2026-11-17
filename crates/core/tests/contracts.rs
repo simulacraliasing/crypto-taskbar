@@ -81,6 +81,77 @@ fn batch_urls_and_mapping() {
     assert_eq!(encode("BTC/USDT &"), "BTC%2FUSDT%20%26");
 }
 #[test]
+fn binance_stock_contracts_use_futures_endpoints_for_every_period() {
+    let mut c = Config::default();
+    let stock = Coin {
+        label: "NVDA".into(),
+        symbol: canonical_pair(" nvda/usdt "),
+        source: "binance-futures".into(),
+    };
+    c.coins.push(stock.clone());
+    c.validate().unwrap();
+    assert_eq!(stock.symbol, "NVDAUSDT");
+    assert_eq!(
+        c.request_url(&stock, false, 0).unwrap(),
+        "https://fapi.binance.com/fapi/v1/ticker/24hr?symbol=NVDAUSDT"
+    );
+    assert!(
+        c.request_url(&c.coins[0], false, 0)
+            .unwrap()
+            .starts_with("https://api.binance.com/api/v3/")
+    );
+    let source = &c.sources["binance-futures"];
+    let ticker = json!({"symbol":"NVDAUSDT", "lastPrice":"157.16", "priceChangePercent":"-2.500"});
+    for period in PERIODS {
+        c.change_period = period.into();
+        let mut q = Quote::parse(&ticker, source, &stock, period).unwrap();
+        assert_eq!(q.price, Some(157.16));
+        if period == "24h" {
+            assert_eq!(q.change, Some(-2.5));
+        } else {
+            assert!(q.change.is_none());
+            let url = c.request_url(&stock, true, 1800000000000).unwrap();
+            assert!(url.starts_with(
+                "https://fapi.binance.com/fapi/v1/klines?symbol=NVDAUSDT&interval=1m&startTime="
+            ));
+            let start = (1800000000000 - period_seconds(period).unwrap() * 1000) / 60000 * 60000;
+            assert!(url.contains(&format!(
+                "startTime={start}&endTime={}&limit=1",
+                start + 59999
+            )));
+            q.apply_history(&json!([[start, "160"]]), source, &stock)
+                .unwrap();
+            assert!((q.change.unwrap() + 1.775).abs() < 1e-9);
+        }
+    }
+    assert_eq!(Config::parse(&serde_json::to_vec(&c).unwrap()).unwrap(), c);
+}
+
+#[test]
+fn legacy_futures_source_gets_history_without_rewriting_custom_sources() {
+    let mut j = serde_json::to_value(Config::default()).unwrap();
+    let mut futures = j["sources"]["binance-futures"].take();
+    futures.as_object_mut().unwrap().remove("historyUrl");
+    futures.as_object_mut().unwrap().remove("historyPricePath");
+    j["sources"]
+        .as_object_mut()
+        .unwrap()
+        .remove("binance-futures");
+    j["sources"]["stocks"] = futures;
+    let c = Config::parse(&serde_json::to_vec(&j).unwrap()).unwrap();
+    assert!(
+        c.sources["stocks"]
+            .history_url
+            .starts_with("https://fapi.binance.com/fapi/v1/klines?")
+    );
+    assert!(!c.sources.contains_key("binance-futures"));
+
+    j["sources"]["stocks"]["url"] =
+        json!("https://fapi.binance.com/fapi/v1/ticker/24hr-custom?symbol={symbol}");
+    let c = Config::parse(&serde_json::to_vec(&j).unwrap()).unwrap();
+    assert!(c.sources["stocks"].history_url.is_empty());
+}
+#[test]
 fn history_timestamp_and_no_wrong_period() {
     let c = Config {
         change_period: "30d".into(),

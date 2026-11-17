@@ -118,12 +118,9 @@ impl Config {
                 source.symbol_map = defaults.sources["coingecko"].symbol_map.clone();
             }
             if raw.get("historyUrl").is_none() {
-                for preset in ["binance", "okx"] {
+                for preset in ["binance", "binance-futures", "okx"] {
                     let original = &defaults.sources[preset];
-                    if source
-                        .url
-                        .starts_with(original.url.split('?').next().unwrap())
-                    {
+                    if source.url.split('?').next() == original.url.split('?').next() {
                         source.history_url = original.history_url.clone();
                         source.history_price_path = original.history_price_path.clone();
                     }

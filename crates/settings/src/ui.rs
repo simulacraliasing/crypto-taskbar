@@ -1,7 +1,14 @@
 use anyhow::{Context as _, Result as AResult, ensure};
 use crypto_taskbar_core::{Coin, Config, Source, canonical_pair, parse_color};
 use gpui_kit::component::{
-    button::*, checkbox::Checkbox, color_picker::*, input::*, list::ListItem, select::*, *,
+    button::*,
+    checkbox::Checkbox,
+    color_picker::*,
+    input::*,
+    list::ListItem,
+    menu::{DropdownMenu, PopupMenuItem},
+    select::*,
+    *,
 };
 use gpui_kit::*;
 use std::path::PathBuf;
@@ -523,13 +530,24 @@ impl Settings {
         }
         cx.notify();
     }
-    fn add_source(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn add_source(&mut self, preset: Option<&str>, window: &mut Window, cx: &mut Context<Self>) {
         let result = self.commit_source(cx);
         if !self.report(result, cx) {
             return;
         }
+        if let Some(preset) = preset {
+            let mut name = preset.to_owned();
+            let mut suffix = 2;
+            while self.draft.sources.contains_key(&name) {
+                name = format!("{preset}-{suffix}");
+                suffix += 1;
+            }
+            let source = Config::default().sources[preset].clone();
+            self.source = SourceForm::new(&name, &source, window, cx);
+        } else {
+            self.source = SourceForm::new("", &Source::default(), window, cx);
+        }
         self.selected_source = None;
-        self.source = SourceForm::new("", &Source::default(), window, cx);
         cx.notify();
     }
     fn remove_source(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -636,6 +654,7 @@ impl Settings {
             .into_any_element()
     }
     fn sources_page(&self, cx: &mut Context<Self>) -> AnyElement {
+        let view = cx.weak_entity();
         let list = self.draft.sources.keys().map(|name| {
             let name = name.clone();
             ListItem::new(SharedString::from(format!("source-{name}")))
@@ -666,8 +685,31 @@ impl Settings {
                     .child(
                         h_flex()
                             .gap_2()
-                            .child(Button::new("source-add").label("添加").on_click(
-                                cx.listener(|this, _, window, cx| this.add_source(window, cx)),
+                            .child(Button::new("source-add").label("添加").dropdown_menu(
+                                move |menu, _, _| {
+                                    let custom_view = view.clone();
+                                    let futures_view = view.clone();
+                                    menu.item(PopupMenuItem::new("自定义").on_click(
+                                        move |_, window, cx| {
+                                            let _ = custom_view.update(cx, |this, cx| {
+                                                this.add_source(None, window, cx)
+                                            });
+                                        },
+                                    ))
+                                    .item(
+                                        PopupMenuItem::new("币安合约（含股票）").on_click(
+                                            move |_, window, cx| {
+                                                let _ = futures_view.update(cx, |this, cx| {
+                                                    this.add_source(
+                                                        Some("binance-futures"),
+                                                        window,
+                                                        cx,
+                                                    )
+                                                });
+                                            },
+                                        ),
+                                    )
+                                },
                             ))
                             .child(Button::new("source-remove").label("删除").on_click(
                                 cx.listener(|this, _, window, cx| this.remove_source(window, cx)),

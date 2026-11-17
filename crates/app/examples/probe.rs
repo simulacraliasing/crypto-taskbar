@@ -5,11 +5,36 @@ fn main() -> anyhow::Result<()> {
     let client = Client::new()?;
     let stop = AtomicBool::new(false);
     let mut config = Config::default();
-    for source in ["binance", "okx", "coingecko"] {
+    let mut sources = vec![
+        "binance".to_owned(),
+        "okx".to_owned(),
+        "coingecko".to_owned(),
+    ];
+    let mut symbol = "BTCUSDT".to_owned();
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--source" => {
+                sources = vec![
+                    args.next()
+                        .ok_or_else(|| anyhow::anyhow!("--source needs a name"))?,
+                ]
+            }
+            "--symbol" => {
+                symbol = crypto_taskbar_core::canonical_pair(
+                    &args
+                        .next()
+                        .ok_or_else(|| anyhow::anyhow!("--symbol needs a pair"))?,
+                )
+            }
+            _ => anyhow::bail!("Unknown argument: {arg}"),
+        }
+    }
+    for source in sources {
         let coin = Coin {
-            label: "BTC".into(),
-            symbol: "BTCUSDT".into(),
-            source: source.into(),
+            label: symbol.clone(),
+            symbol: symbol.clone(),
+            source: source.clone(),
         };
         config.coins = vec![coin.clone()];
         for period in PERIODS {
@@ -17,7 +42,10 @@ fn main() -> anyhow::Result<()> {
                 continue;
             }
             config.change_period = period.into();
-            let s = &config.sources[source];
+            let s = config
+                .sources
+                .get(&source)
+                .ok_or_else(|| anyhow::anyhow!("Unknown source: {source}"))?;
             let body = client.get(&config.request_url(&coin, false, 0)?, s, &stop)?;
             let mut quote = Quote::parse(&body, s, &coin, period)?;
             if period != "24h" {
@@ -26,7 +54,7 @@ fn main() -> anyhow::Result<()> {
                 quote.apply_history(&history, s, &coin)?;
                 let timestamp = number_at(
                     &history,
-                    if source == "binance" {
+                    if source == "binance" || source == "binance-futures" {
                         "/0/0"
                     } else {
                         "/data/0/0"

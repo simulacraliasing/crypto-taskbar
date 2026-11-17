@@ -24,6 +24,13 @@
       "historyUrl": "https://api.binance.com/api/v3/klines?symbol={symbol}&interval=1m&startTime={startTimeMs}&limit=1",
       "historyPricePath": "/0/1"
     },
+    "binance-futures": {
+      "url": "https://fapi.binance.com/fapi/v1/ticker/24hr?symbol={symbol}",
+      "pricePath": "/lastPrice",
+      "changePath": "/priceChangePercent",
+      "historyUrl": "https://fapi.binance.com/fapi/v1/klines?symbol={symbol}&interval=1m&startTime={startTimeMs}&endTime={endTimeMs}&limit=1",
+      "historyPricePath": "/0/1"
+    },
     "okx": {
       "url": "https://www.okx.com/api/v5/market/ticker?instId={symbol}",
       "pricePath": "/data/0/last",
